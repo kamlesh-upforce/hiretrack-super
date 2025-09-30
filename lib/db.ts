@@ -21,7 +21,6 @@ global.mongoose = cached;
 export async function connectToDatabase(): Promise<typeof mongoose> {
   if (cached.conn) return cached.conn;
   if (!cached.promise) {
-    console.log("Connecting to MongoDB at:", MONGODB_URI);
     cached.promise = mongoose
       .connect(MONGODB_URI)
       .then((m) => {
