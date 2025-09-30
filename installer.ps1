@@ -127,7 +127,6 @@ const macAddress = Object.values(networkInterfaces)
 const machineString = \`\${os.platform()}-\${os.arch()}-\${os.hostname()}-\${macAddress}\`;
 const machineCode = crypto.createHash('sha256').update(machineString).digest('hex').substring(0, 16);
 
-console.log(machineCode);
 "
 
 Write-Status "Machine code generated: $MachineCode"

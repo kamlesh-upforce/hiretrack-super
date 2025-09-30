@@ -10,8 +10,7 @@ export async function POST(req: Request) {
   try {
     await connectToDatabase();
     const body = await req.json();
-    console.log("BODY: ", body);
-    
+
     // Validate request body
     const validationResult = licenseRegisterSchema.safeParse(body);
     if (!validationResult.success) {
@@ -27,7 +26,10 @@ export async function POST(req: Request) {
     const { machineCode, version, email } = body;
 
     // Check if a license with the same email and machineCode already exists
-    const existingLicense = await License.findOne({ email, machineCode });
+    // const existingLicense = await License.findOne({ email, machineCode });
+    const existingLicense = await License.findOne({
+      $or: [{ email }, { machineCode }],
+    });
     if (existingLicense) {
       return NextResponse.json(
         {
@@ -77,7 +79,6 @@ export async function POST(req: Request) {
     });
   } catch (error: any) {
     console.error("Error registering license:", error);
-    console.log("Error registering license:", error.message);
     return NextResponse.json(
       { error: "Internal server error", message: error.message },
       { status: 500 }

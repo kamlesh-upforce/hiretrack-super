@@ -24,14 +24,12 @@ export async function GET(req: Request) {
 
     if (id) {
       const client = await Client.findOne({ _id: new Types.ObjectId(id) });
-      console.log("CLIENT: ", client);
       if (!client) {
         return NextResponse.json(
           { error: "Client not found" },
           { status: 404 }
         );
       }
-      console.log("CLKIENT: ", client);
       return NextResponse.json(client);
     }
 
