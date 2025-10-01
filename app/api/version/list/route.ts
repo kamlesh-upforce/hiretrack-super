@@ -74,6 +74,7 @@ export async function GET() {
 
     return NextResponse.json({
       totalVersions: versions.length,
+      latestVerson: versions[0]?.version || null,
       versions: versions,
     });
   } catch (error) {
