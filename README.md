@@ -1,28 +1,68 @@
 # HireTrack Installer Script
 
-This Bash script automates the installation, configuration, and management of the **HireTrack** application. It handles dependencies, installs and configures Nginx, manages MongoDB (local or Atlas), registers and validates licenses, and supports application updates via an API. The script is designed to work on Linux and macOS systems.
-
-## Features
-
-- **Self-copying installer**: Copies itself to `~/.myapp/installer.sh` for consistent execution.
-- **Dependency management**: Installs required tools like `curl`, `jq`, `tar`, `shasum`, Node.js, PM2, and MongoDB.
-- **Nginx configuration**: Sets up Nginx as a reverse proxy with optional HTTPS using Let's Encrypt.
-- **MongoDB support**: Configures MongoDB Atlas (cloud) or local MongoDB installation.
-- **License management**: Registers and validates licenses via an API.
-- **Version management**: Supports installing specific versions or auto-updating to the latest version.
-- **Cron job for updates**: Optionally sets up a cron job to check for updates every 2 minutes.
-- **Backup and rollback**: Creates backups before updates and supports rollback on failure.
+This guide provides essential steps to install and configure the HireTrack application on Linux (Debian/Ubuntu or CentOS) or macOS using the provided installer script.
 
 ## Prerequisites
 
-- **Operating System**: Linux (Debian/Ubuntu or CentOS) or macOS.
-- **Root/Superuser Access**: Required for installing system packages (e.g., Nginx, MongoDB).
-- **Internet Access**: Needed for downloading dependencies, assets, and communicating with the API.
-- **Homebrew**: Required on macOS for installing dependencies.
+- Linux (Debian/Ubuntu or CentOS) or macOS
+- A valid email address for license registration
+- Internet access for downloading dependencies and the application
 
-## Installation
+## Installation Steps
 
-1. **Download the Script**:
-   Save the script as `installer.sh` and make it executable:
+1. **Extract the Installer**
+
+   - Save the `hiretrack.gz` file to your desired directory.
+   - Extract it:
+     ```bash
+     tar -xzf hiretrack.gz
+     ```
+     <!-- - Navigate to the extracted directory:
+       ```bash
+       cd hiretrack-installer
+       ``` -->
+
+2. **Make the Script Executable**
+
    ```bash
    chmod +x installer.sh
+   ```
+
+3. **Run the Installer**
+
+   ```bash
+   ./installer.sh
+   ```
+
+   - Replace `your-email@example.com` with your email address.
+   - If no email is provided, you’ll be prompted to enter one.
+
+4. **Respond to Prompts**
+
+   - **Email**: Enter a valid email if not provided in the command.
+   - **MongoDB Setup**:
+     - Choose `1` for MongoDB Atlas (cloud) and provide the connection URL.
+     - Choose `2` for a local MongoDB (installed automatically).
+   - **Domain Name**: Enter a domain ( e.g., `release.hiretrack.in` )
+   - **SSL Setup**: For non-localhost domains, confirm SSL certificate generation or proceed with HTTP only. Otherwise It's important to continue with HTTPS.
+   - **Application Check**: Ensure the app is running on port 3000; choose to continue if not detected.
+
+5. **Verify Installation**
+   - Upon completion, you’ll see:
+     ```
+     Installation completed
+     🌐 Access your application:
+        - https://<domain>
+     You can register the first organization at:
+     https://<domain>/register/org
+     ```
+   - Access the application via the provided URL in a browser.
+
+## Troubleshooting
+
+- **DNS Issues**: Ensure your domain points to your server’s IP for SSL setup.
+- **MongoDB Errors**: Verify the Atlas URL or check local MongoDB logs at `/var/log/mongodb/mongod.log`.
+- **Nginx Issues**: Check logs at `/var/log/nginx/<domain>.{access,error}.log`.
+- **PM2**: View running processes with `pm2 list`.
+
+For support, contact HireTrack Super Admin
