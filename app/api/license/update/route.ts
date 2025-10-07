@@ -3,6 +3,7 @@ import { connectToDatabase } from "@/lib/db";
 import License from "@/app/models/license";
 import { licenseUpdateSchema } from "@/lib/validators";
 import { generateLicenseKey } from "@/lib/license";
+import Client from "@/app/models/client";
 
 // PATCH: Update license details
 export async function PATCH(req: Request) {
@@ -39,7 +40,17 @@ export async function PATCH(req: Request) {
         { status: 400 }
       );
     }
-
+    // Check if a client exists with this email in the Client collection
+    const existingClient = await Client.findOne({ email: updateData.email });
+    if (!existingClient) {
+      return NextResponse.json(
+        {
+          error:
+            "No Client is registered with this email. Please the client through Super Admin.",
+        },
+        { status: 400 }
+      );
+    }
     // Find and update the license
     // Update the license
     const updatedLicense = await License.findOneAndUpdate(
@@ -69,6 +80,7 @@ export async function PATCH(req: Request) {
           message: "License updated successfully",
           newLicenseKey: newLicenseKey,
           newMachineCode: updateData.machineCode,
+          email: updateData.email,
         });
       }
     }

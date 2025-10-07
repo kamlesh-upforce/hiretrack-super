@@ -35,11 +35,11 @@ export default function ClientDetailComponent({
 
         // Fetch licenses for this client
         const licensesResponse = await fetch(
-          `/api/license/read?clientId=${id}`
+          `/api/license/read?email=${clientData?.email}`
         );
         if (licensesResponse.ok) {
           const licensesData = await licensesResponse.json();
-          setLicenses(Array.isArray(licensesData) ? licensesData[0] : []);
+          setLicenses([licensesData]);
         }
 
         setLoading(false);
@@ -171,7 +171,7 @@ export default function ClientDetailComponent({
                 </tr>
               </thead>
               <tbody>
-                {licenses.map((license) => (
+                {licenses?.map((license) => (
                   <tr key={String(license._id)} className="border-t">
                     <td className="py-2 px-4">{license.licenseKey}</td>
                     <td className="py-2 px-4">

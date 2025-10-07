@@ -8,11 +8,11 @@ export async function GET(req: Request) {
     await connectToDatabase();
     const { searchParams } = new URL(req.url);
     const licenseKey = searchParams.get("licenseKey");
-    // const email = searchParams.get("email");
+    const email = searchParams.get("email");
 
     // If license key is provided, return that specific license
     if (licenseKey) {
-      const license = await License.findOne({ licenseKey });
+      const license = await License.findById(licenseKey );
       if (!license) {
         return NextResponse.json(
           { error: "License not found" },
@@ -23,10 +23,16 @@ export async function GET(req: Request) {
     }
 
     // If client ID is provided, return all licenses for that client
-    // if (email) {
-    //   const licenses = await License.find({ email });
-    //   return NextResponse.json(licenses);
-    // }
+    if (email) {
+      const licenses = await License.findOne({ email });
+         if (!licenses) {
+        return NextResponse.json(
+          { error: "License not found" },
+          { status: 404 }
+        );
+      }
+      return NextResponse.json(licenses);
+    }
 
     // Otherwise return all licenses
     const licenses = await License.find();

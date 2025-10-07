@@ -25,17 +25,17 @@ export default function LicenseDetailClient({ id }: LicenseDetailClientProps) {
         setLoading(true);
 
         // Fetch license details
-        const licenseResponse = await fetch(`/api/license/read?_id=${id}`);
+        const licenseResponse = await fetch(`/api/license/read?licenseKey=${id}`);
         if (!licenseResponse.ok) {
           throw new Error("Failed to fetch license details");
         }
 
         const licenseData = await licenseResponse.json();
-        setLicense(licenseData[0]);
-        setStatusUpdate(licenseData[0].status);
+        setLicense(licenseData);
+        setStatusUpdate(licenseData.status);
         // Fetch client details
         const clientResponse = await fetch(
-          `/api/client/read?email=${licenseData[0].email}`
+          `/api/client/read?email=${licenseData.email}`
         );
         if (!clientResponse.ok) {
           throw new Error("Failed to fetch client details");
