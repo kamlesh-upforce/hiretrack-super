@@ -2,7 +2,7 @@
 import mongoose from "mongoose";
 
 const MONGODB_URI =
-  process.env.MONGODB_URI || "mongodb://localhost:27017/license-admin";
+  process.env.MONGODB_URI + process.env.MONGODB_DBNAME || "mongodb://localhost:27017/license-admin";
 
 export type MongooseCache = {
   conn: typeof mongoose | null;
