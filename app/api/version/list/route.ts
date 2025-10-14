@@ -85,7 +85,7 @@ export async function GET(req: Request) {
         };
       })
       // Filter only if both currentVersion and upgradeVersion are provided
-      .filter(v => currentVersion || upgradeVersion ? isVersionInRange(v.version, currentVersion!, upgradeVersion!) : true);
+      .filter((v:any) => currentVersion || upgradeVersion ? isVersionInRange(v.version, currentVersion!, upgradeVersion!) : true);
 
     return NextResponse.json({
       totalVersions: versions.length,
