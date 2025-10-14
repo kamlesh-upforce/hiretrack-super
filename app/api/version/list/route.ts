@@ -1,9 +1,34 @@
 import { NextResponse } from "next/server";
 
+// Utility function to compare semantic versions
+function isVersionInRange(version: string, currentVersion?: string, upgradeVersion?: string) {
+  if (!currentVersion && !upgradeVersion) return true; // no range specified
+
+  const v = version.split(".").map(Number);
+  const current = currentVersion?.split(".").map(Number) || [];
+  const upgrade = upgradeVersion?.split(".").map(Number) || [];
+
+  // Compare helper
+  const compare = (a: number[], b: number[]) => {
+    for (let i = 0; i < Math.max(a.length, b.length); i++) {
+      const diff = (a[i] || 0) - (b[i] || 0);
+      if (diff !== 0) return diff;
+    }
+    return 0;
+  };
+
+  if (currentVersion && compare(v, current) < 0) return false; // version < current
+  if (upgradeVersion && compare(v, upgrade) > 0) return false; // version > upgrade
+  return true;
+}
+
 // GET: List all available versions from GitHub releases
-export async function GET() {
+export async function GET(req: Request) {
   try {
-    // Fetch releases from GitHub API
+    const { searchParams } = new URL(req.url);
+    const currentVersion = searchParams.get("currentVersion");
+    const upgradeVersion = searchParams.get("upgradeVersion");
+
     const githubResponse = await fetch(
       "https://api.github.com/repos/rahulp162/hiretrack-release/releases",
       {
@@ -23,59 +48,49 @@ export async function GET() {
 
     const releases = await githubResponse.json();
 
-    // Process releases to extract version info
-    const versions = releases.map((release: any) => {
-      const version = release.tag_name.replace(/^v/, "");
-      const assets = release.assets || [];
+    const versions = releases
+      .map((release: any) => {
+        const version = release.tag_name.replace(/^v/, "");
+        const assets = release.assets || [];
 
-      // Get available platforms
-      const platforms = [];
-      if (
-        assets.some(
-          (asset: any) =>
-            asset.name.toLowerCase().includes(".exe") ||
-            asset.name.toLowerCase().includes("windows")
-        )
-      ) {
-        platforms.push("windows");
+        const platforms: string[] = [];
+        if (assets.some((a: any) => a.name.toLowerCase().includes(".exe") || a.name.toLowerCase().includes("windows"))) platforms.push("windows");
+        if (assets.some((a: any) => a.name.toLowerCase().includes(".dmg") || a.name.toLowerCase().includes("mac"))) platforms.push("mac");
+        if (assets.some((a: any) => a.name.toLowerCase().includes(".deb") || a.name.toLowerCase().includes(".rpm") || a.name.toLowerCase().includes("linux"))) platforms.push("linux");
+        
+        
+      let migrationScriptUrl = null;
+  
+      const migrationAsset = assets.find((asset: any) =>
+        asset.name.includes("migrationScriptUrl")
+      );
+      if (migrationAsset) {
+        migrationScriptUrl = migrationAsset.browser_download_url;
       }
-      if (
-        assets.some(
-          (asset: any) =>
-            asset.name.toLowerCase().includes(".dmg") ||
-            asset.name.toLowerCase().includes("mac")
-        )
-      ) {
-        platforms.push("mac");
-      }
-      if (
-        assets.some(
-          (asset: any) =>
-            asset.name.toLowerCase().includes(".deb") ||
-            asset.name.toLowerCase().includes(".rpm") ||
-            asset.name.toLowerCase().includes("linux")
-        )
-      ) {
-        platforms.push("linux");
-      }
+        const asset = assets[0]?.browser_download_url || null;
+      
 
-      return {
-        version: version,
-        tagName: release.tag_name,
-        platforms: platforms,
-        publishedAt: release.published_at,
-        isPrerelease: release.prerelease,
-        isDraft: release.draft,
-        releaseNotes: release.body,
-        releaseUrl: release.html_url,
-        assetCount: assets.length,
-      };
-    });
+        return {
+          version,
+          tagName: release.tag_name,
+          platforms,
+          publishedAt: release.published_at,
+          isPrerelease: release.prerelease,
+          isDraft: release.draft,
+          releaseNotes: release.body,
+          releaseUrl: release.html_url,
+          assetCount: assets.length,
+          asset,
+          migrationScriptUrl,
+        };
+      })
+      // Filter only if both currentVersion and upgradeVersion are provided
+      .filter(v => currentVersion || upgradeVersion ? isVersionInRange(v.version, currentVersion!, upgradeVersion!) : true);
 
     return NextResponse.json({
       totalVersions: versions.length,
-      latestVerson: versions[0]?.version || null,
-      versions: versions,
+      latestVersion: versions[0]?.version || null,
+      versions,
     });
   } catch (error) {
     console.error("Error fetching version list:", error);
