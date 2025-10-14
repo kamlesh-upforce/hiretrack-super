@@ -1,14 +1,25 @@
 import { NextResponse } from "next/server";
 
 // Utility function to compare semantic versions
+function compareVersions(a: string, b: string) {
+  const pa = a.split(".").map(Number);
+  const pb = b.split(".").map(Number);
+
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const diff = (pa[i] || 0) - (pb[i] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+// Check if version lies between currentVersion and upgradeVersion
 function isVersionInRange(version: string, currentVersion?: string, upgradeVersion?: string) {
-  if (!currentVersion && !upgradeVersion) return true; // no range specified
+  if (!currentVersion && !upgradeVersion) return true;
 
   const v = version.split(".").map(Number);
   const current = currentVersion?.split(".").map(Number) || [];
   const upgrade = upgradeVersion?.split(".").map(Number) || [];
 
-  // Compare helper
   const compare = (a: number[], b: number[]) => {
     for (let i = 0; i < Math.max(a.length, b.length); i++) {
       const diff = (a[i] || 0) - (b[i] || 0);
@@ -48,44 +59,47 @@ export async function GET(req: Request) {
 
     const releases = await githubResponse.json();
 
-    const versions = releases
-      .map((release: any) => {
-        const version = release.tag_name.replace(/^v/, "");
-        const assets = release.assets || [];
+    let versions = releases.map((release: any) => {
+      const version = release.tag_name.replace(/^v/, "");
+      const assets = release.assets || [];
 
-        const platforms: string[] = [];
-        if (assets.some((a: any) => a.name.toLowerCase().includes(".exe") || a.name.toLowerCase().includes("windows"))) platforms.push("windows");
-        if (assets.some((a: any) => a.name.toLowerCase().includes(".dmg") || a.name.toLowerCase().includes("mac"))) platforms.push("mac");
-        if (assets.some((a: any) => a.name.toLowerCase().includes(".deb") || a.name.toLowerCase().includes(".rpm") || a.name.toLowerCase().includes("linux"))) platforms.push("linux");
-        
-        
+      const platforms: string[] = [];
+      if (assets.some((a: any) => a.name.toLowerCase().includes(".exe") || a.name.toLowerCase().includes("windows"))) platforms.push("windows");
+      if (assets.some((a: any) => a.name.toLowerCase().includes(".dmg") || a.name.toLowerCase().includes("mac"))) platforms.push("mac");
+      if (assets.some((a: any) => a.name.toLowerCase().includes(".deb") || a.name.toLowerCase().includes(".rpm") || a.name.toLowerCase().includes("linux"))) platforms.push("linux");
+
       let migrationScriptUrl = null;
-  
       const migrationAsset = assets.find((asset: any) =>
         asset.name.includes("migrationScriptUrl")
       );
       if (migrationAsset) {
         migrationScriptUrl = migrationAsset.browser_download_url;
       }
-        const asset = assets[0]?.browser_download_url || null;
-      
 
-        return {
-          version,
-          tagName: release.tag_name,
-          platforms,
-          publishedAt: release.published_at,
-          isPrerelease: release.prerelease,
-          isDraft: release.draft,
-          releaseNotes: release.body,
-          releaseUrl: release.html_url,
-          assetCount: assets.length,
-          asset,
-          migrationScriptUrl,
-        };
-      })
-      // Filter only if both currentVersion and upgradeVersion are provided
-      .filter((v:any) => currentVersion || upgradeVersion ? isVersionInRange(v.version, currentVersion!, upgradeVersion!) : true);
+      const asset = assets[0]?.browser_download_url || null;
+
+      return {
+        version,
+        tagName: release.tag_name,
+        platforms,
+        publishedAt: release.published_at,
+        isPrerelease: release.prerelease,
+        isDraft: release.draft,
+        releaseNotes: release.body,
+        releaseUrl: release.html_url,
+        assetCount: assets.length,
+        asset,
+        migrationScriptUrl,
+      };
+    });
+
+    // ✅ Apply version range filter if provided
+    if (currentVersion || upgradeVersion) {
+      versions = versions
+        .filter((v: any) => isVersionInRange(v.version, currentVersion!, upgradeVersion!))
+        // ✅ Sort ascending only when filters exist
+        .sort((a: any, b: any) => compareVersions(a.version, b.version));
+    }
 
     return NextResponse.json({
       totalVersions: versions.length,
