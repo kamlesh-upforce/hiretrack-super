@@ -1,0 +1,3041 @@
+#!/bin/bash
+set -euo pipefail
+
+# ------------------------------------------------
+# PowerShell wrapper for Windows tasks (excluding JSON processing)
+# ------------------------------------------------
+pwsh() { powershell.exe -NoProfile -Command "$*"; }
+
+# ------------------------------------------------
+# Constants and Environment Variables
+# ------------------------------------------------
+INSTALLER_DEST="$HOME/.myapp/installer.sh"
+APP_INSTALL_DIR="$HOME/.myapp/APP"
+BACKUP_DIR="$HOME/.myapp/backup"
+RELEASES_DIR="$HOME/.myapp/releases"
+TMP_INSTALL_DIR="$HOME/.myapp/tmp_install"
+CONFIG_PATH="$HOME/.myapp/config.json"
+LICENSE_PATH="$HOME/.myapp/license.json"
+SCRIPT_PATH="$HOME/.myapp/installer.sh"
+LOG_DIR="$HOME/.myapp/logs"
+CRON_LOG_FILE="$LOG_DIR/cron_update.log"
+
+API_URL="https://hiretrack-super.vercel.app/api/license/register"
+API_URL_UPDATE_LIC="https://hiretrack-super.vercel.app/api/license/update"
+VALIDATE_API="https://hiretrack-super.vercel.app/api/license/validate"
+LATEST_VERSION_API="https://hiretrack-super.vercel.app/api/version/list"
+
+MONGODB_VERSION="${MONGODB_VERSION:-7.0}"
+NODE_VERSION_DEFAULT=20
+
+mkdir -p "$APP_INSTALL_DIR" "$BACKUP_DIR" "$RELEASES_DIR" "$TMP_INSTALL_DIR" "$LOG_DIR"
+
+# ------------------------------------------------
+# Windows-Specific Setup: Install Chocolatey if not present
+# ------------------------------------------------
+install_chocolatey() {
+    if command -v choco >/dev/null 2>&1; then
+        echo "✅ Chocolatey already installed (version: $(choco -v))."
+        return
+    fi
+    if [ -d "/c/ProgramData/chocolatey" ]; then
+        echo "⚠ Detected existing Chocolatey installation, but 'choco' command not found."
+        echo "Removing existing installation..."
+        rm -rf /c/ProgramData/chocolatey || {
+            echo "❌ Failed to remove existing Chocolatey installation. Please remove 'C:/ProgramData/chocolatey' manually and retry."
+            exit 1
+        }
+    fi
+    echo "📦 Installing Chocolatey..."
+    pwsh "Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))"
+    export PATH="$PATH:/c/ProgramData/chocolatey/bin"
+    if ! command -v choco >/dev/null 2>&1; then
+        echo "❌ Failed to install Chocolatey. Please check your internet connection or permissions."
+        exit 1
+    fi
+    echo "✅ Chocolatey installed (version: $(choco -v))."
+}
+
+install_chocolatey
+
+# ------------------------------------------------
+# Auto-copy Installer
+# ------------------------------------------------
+if [ "$(realpath "$0")" != "$INSTALLER_DEST" ]; then
+    echo "📦 Copying installer to $HOME/.myapp..."
+    mkdir -p "$HOME/.myapp"
+    cp "$0" "$INSTALLER_DEST"
+    chmod +x "$INSTALLER_DEST"
+    echo "✅ Installer ready at $INSTALLER_DEST"
+    echo "🚀 Auto-running installer with --install..."
+    exec "$INSTALLER_DEST" "$@"
+    exit 0
+fi
+
+# ------------------------------------------------
+# Utility Functions
+# ------------------------------------------------
+check_dep() {
+    local CMD="$1"
+    local CHOCO_PKG="$CMD"
+    [ "$CMD" = "7z" ] && CHOCO_PKG="7zip"
+    [ "$CMD" = "yq" ] && CHOCO_PKG="yq"
+    if command -v "$CMD" >/dev/null 2>&1; then
+        echo "✅ $CMD is available."
+        return
+    fi
+    if choco list --local-only | grep -qi "$CHOCO_PKG"; then
+        echo "✅ $CHOCO_PKG is already installed, but $CMD command not found. Ensuring PATH includes Chocolatey bin..."
+        export PATH="$PATH:/c/ProgramData/chocolatey/bin"
+        if command -v "$CMD" >/dev/null 2>&1; then
+            echo "✅ $CMD is now available."
+            return
+        else
+            echo "⚠ $CMD still not found. Attempting to reinstall $CHOCO_PKG..."
+            choco install -y "$CHOCO_PKG" --force --source=https://community.chocolatey.org/api/v2/
+            if ! command -v "$CMD" >/dev/null 2>&1; then
+                echo "❌ Failed to install $CHOCO_PKG or $CMD command not found. Check Chocolatey logs at C:/ProgramData/chocolatey/logs/chocolatey.log."
+                exit 1
+            fi
+            echo "✅ $CMD is now available."
+            return
+        fi
+    fi
+    echo "⚠ $CHOCO_PKG not installed. Installing via Chocolatey..."
+    choco install -y "$CHOCO_PKG" --source=https://community.chocolatey.org/api/v2/
+    if ! command -v "$CMD" >/dev/null 2>&1; then
+        echo "❌ Failed to install $CHOCO_PKG or $CMD command not found. Check Chocolatey logs at C:/ProgramData/chocolatey/logs/chocolatey.log."
+        exit 1
+    fi
+    echo "✅ $CMD is available."
+}
+
+get_machine_code() {
+    local OS_TYPE
+    OS_TYPE=$(uname -s | tr '[:upper:]' '[:lower:]')
+    if [[ "$OS_TYPE" == *mingw* ]]; then
+        OS_TYPE="windows"
+    fi
+    if [[ "$OS_TYPE" == "windows" ]]; then
+        hostname | sha256sum | awk '{print $1}'
+    else
+        echo "❌ Unsupported OS: $OS_TYPE"
+        exit 1
+    fi
+}
+
+prompt_for_email() {
+    read -p "Enter your email: " EMAIL
+    if [ -z "$EMAIL" ]; then
+        echo "❌ Email cannot be empty."
+        exit 1
+    fi
+    echo "$EMAIL"
+}
+
+prompt_for_version() {
+    read -p "Enter the version to install: " VERSION
+    if [ -z "$VERSION" ]; then
+        echo "❌ Version cannot be empty."
+        exit 1
+    fi
+    VERSION=${VERSION#hiretrack-}
+    echo "$VERSION"
+}
+
+write_env_mongo_url() {
+    local APP_DIR="$1"
+    local URL="$2"
+    local ENV_FILE="$APP_DIR/.env"
+    mkdir -p "$APP_DIR"
+    if [ -f "$ENV_FILE" ]; then
+        grep -v "^MONGODB_URI=" "$ENV_FILE" > "${ENV_FILE}.tmp" || true
+        echo "MONGODB_URI=$URL" >> "${ENV_FILE}.tmp"
+        mv "${ENV_FILE}.tmp" "$ENV_FILE"
+    else
+        echo "MONGODB_URI=$URL" > "$ENV_FILE"
+    fi
+    chmod u+rw "$ENV_FILE"
+    echo "✅ MongoDB URL updated in $ENV_FILE"
+}
+
+# write_config() {
+#     local KEY="$1"
+#     local VALUE="$2"
+#     local TEMP_FILE=$(mktemp)
+
+#     if [ ! -f "$CONFIG_PATH" ]; then
+#         echo "⚠ config.json not found at $CONFIG_PATH. Creating default config..."
+#         create_default_config
+#     fi
+#     if [ ! -w "$CONFIG_PATH" ]; then
+#         echo "❌ config.json at $CONFIG_PATH is not writable. Check permissions."
+#         exit 1
+#     fi
+
+#     echo "🔍 Writing to config.json: key=$KEY, value=$VALUE"
+#     if yq -o=json '.' "$CONFIG_PATH" > /dev/null 2>&1; then
+#         yq eval ". + {\"$KEY\": \"$VALUE\"}" "$CONFIG_PATH" > "$TEMP_FILE"
+#         if [ -s "$TEMP_FILE" ] && yq -o=json '.' "$TEMP_FILE" > /dev/null 2>&1; then
+#             mv "$TEMP_FILE" "$CONFIG_PATH"
+#             chmod u+rw "$CONFIG_PATH"
+#             echo "✅ Updated $KEY in $CONFIG_PATH"
+#         else
+#             echo "❌ Failed to generate valid JSON for $CONFIG_PATH"
+#             rm -f "$TEMP_FILE"
+#             exit 1
+#         fi
+#     else
+#         echo "❌ config.json contains invalid JSON at $CONFIG_PATH"
+#         rm -f "$TEMP_FILE"
+#         exit 1
+#     fi
+# }
+write_config() {
+    local KEY="$1"
+    local VALUE="$2"
+    local TEMP_FILE=$(mktemp)
+
+    if [ ! -f "$CONFIG_PATH" ]; then
+        echo "⚠ config.json not found at $CONFIG_PATH. Creating default config..."
+        create_default_config
+    fi
+    if [ ! -w "$CONFIG_PATH" ]; then
+        echo "❌ config.json at $CONFIG_PATH is not writable. Check permissions."
+        exit 1
+    fi
+
+    echo "🔍 Writing to config.json: key=$KEY, value=$VALUE"
+    
+    # Clean value for JSON
+    VALUE=$(echo "$VALUE" | sed 's/"/\\"/g')
+    
+    if yq -o=json '.' "$CONFIG_PATH" > /dev/null 2>&1; then
+        yq eval ".${KEY} = \"$VALUE\"" "$CONFIG_PATH" > "$TEMP_FILE"
+        if [ -s "$TEMP_FILE" ] && yq -o=json '.' "$TEMP_FILE" > /dev/null 2>&1; then
+            mv "$TEMP_FILE" "$CONFIG_PATH"
+            chmod u+rw "$CONFIG_PATH"
+            echo "✅ Updated $KEY in $CONFIG_PATH"
+        else
+            echo "❌ Failed to generate valid JSON for $CONFIG_PATH"
+            rm -f "$TEMP_FILE"
+            exit 1
+        fi
+    else
+        echo "❌ config.json contains invalid JSON at $CONFIG_PATH"
+        rm -f "$TEMP_FILE"
+        exit 1
+    fi
+}
+# ------------------------------------------------
+# Config and License Management
+# ------------------------------------------------
+create_default_config() {
+    local PASSED_EMAIL="${1:-}"
+    local CONFIG_DIR=$(dirname "$CONFIG_PATH")
+
+    echo "🔍 Creating default config at $CONFIG_PATH"
+    mkdir -p "$CONFIG_DIR"
+    if [ ! -w "$CONFIG_DIR" ]; then
+        echo "❌ Cannot write to $CONFIG_DIR. Check permissions."
+        exit 1
+    fi
+
+    if [ ! -f "$CONFIG_PATH" ]; then
+        echo '{"autoUpdate": true, "installedVersion": "none"}' > "$CONFIG_PATH"
+        chmod u+rw "$CONFIG_PATH"
+        if [ ! -s "$CONFIG_PATH" ] || ! yq -o=json '.' "$CONFIG_PATH" > /dev/null 2>&1; then
+            echo "❌ Failed to create valid config.json at $CONFIG_PATH"
+            exit 1
+        fi
+        echo "✅ Default config created at $CONFIG_PATH"
+    else
+        echo "✅ Config file already exists at $CONFIG_PATH"
+        if [ ! -s "$CONFIG_PATH" ]; then
+            echo "❌ Existing config.json is empty at $CONFIG_PATH. Recreating..."
+            echo '{"autoUpdate": true, "installedVersion": "none"}' > "$CONFIG_PATH"
+            chmod u+rw "$CONFIG_PATH"
+        fi
+        if ! yq -o=json '.' "$CONFIG_PATH" > /dev/null 2>&1; then
+            echo "❌ Existing config.json contains invalid JSON at $CONFIG_PATH. Recreating..."
+            echo '{"autoUpdate": true, "installedVersion": "none"}' > "$CONFIG_PATH"
+            chmod u+rw "$CONFIG_PATH"
+        fi
+    fi
+
+    if [ -n "$PASSED_EMAIL" ]; then
+        echo "🔍 Processing email: $PASSED_EMAIL"
+        if ! echo "$PASSED_EMAIL" | grep -E '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$' >/dev/null 2>&1; then
+            echo "❌ Invalid email format: $PASSED_EMAIL"
+            exit 1
+        fi
+        local EXISTING_EMAIL
+        EXISTING_EMAIL=$(yq eval '.email // ""' "$CONFIG_PATH")
+        echo "🔍 Existing email: $EXISTING_EMAIL"
+        if [ -n "$EXISTING_EMAIL" ] && [ "$EXISTING_EMAIL" != "null" ]; then
+            echo "⚠ Existing email in config: $EXISTING_EMAIL"
+            read -p "Override email? [y/N]: " OVERRIDE
+            OVERRIDE=${OVERRIDE:-N}
+            if [[ ! "$OVERRIDE" =~ ^[Yy]$ ]]; then
+                echo "✅ Keeping existing email."
+                return
+            fi
+        fi
+        echo "🔍 Writing email to config: $PASSED_EMAIL"
+        write_config "email" "$PASSED_EMAIL"
+    fi
+}
+
+register_license() {
+    local EMAIL="$1"
+    [ -z "$EMAIL" ] && EMAIL=$(prompt_for_email)
+
+    # Ensure config exists with email
+    create_default_config "$EMAIL"
+
+    if [ -f "$LICENSE_PATH" ]; then
+        local EXISTING_LICENSE_KEY
+        EXISTING_LICENSE_KEY=$(yq eval '.licenseKey // ""' "$LICENSE_PATH")
+        if [ -n "$EXISTING_LICENSE_KEY" ] && [ "$EXISTING_LICENSE_KEY" != "null" ]; then
+            echo "✅ License key already exists in $LICENSE_PATH. Skipping registration."
+            return 0
+        fi
+    fi
+
+    local MACHINE_CODE=$(get_machine_code)
+
+    local EXISTING_DB_CHOICE
+    EXISTING_DB_CHOICE=$(yq eval '.dbChoice // ""' "$CONFIG_PATH")
+    local SKIP_DB_SETUP=""
+    if [ -n "$EXISTING_DB_CHOICE" ]; then
+        echo "✅ Database preference already set: $EXISTING_DB_CHOICE"
+        local EXISTING_DB_URL
+        EXISTING_DB_URL=$(yq eval '.dbUrl // ""' "$CONFIG_PATH")
+        [ -n "$EXISTING_DB_URL" ] && echo "🔗 Existing DB URL: $EXISTING_DB_URL"
+        read -p "Do you want to override the database preference and URL? [y/N]: " OVERRIDE
+        OVERRIDE=${OVERRIDE:-N}
+        if [[ ! "$OVERRIDE" =~ ^[Yy]$ ]]; then
+            SKIP_DB_SETUP=1
+            if [ -n "$EXISTING_DB_URL" ]; then
+                write_env_mongo_url "$APP_INSTALL_DIR" "$EXISTING_DB_URL"
+            fi
+        fi
+    fi
+
+    if [ -z "$SKIP_DB_SETUP" ]; then
+        echo "📦 Choose MongoDB option:"
+        echo "1) MongoDB Atlas (cloud)"
+        echo "2) Local MongoDB"
+        read -p "Enter choice [1/2]: " DB_CHOICE
+
+        local APP_DIR="$APP_INSTALL_DIR"
+        local DB_URL
+        if [ "$DB_CHOICE" == "1" ]; then
+            read -p "Enter your MongoDB Atlas connection URL: " ATLAS_URL
+            [ -z "$ATLAS_URL" ] && { echo "❌ MongoDB Atlas URL cannot be empty."; exit 1; }
+            DB_URL="$ATLAS_URL"
+            write_config "dbChoice" "atlas"
+            write_config "dbUrl" "$DB_URL"
+        elif [ "$DB_CHOICE" == "2" ]; then
+            install_and_start_mongodb
+            DB_URL="mongodb://localhost:27017/hiretrack"
+            write_config "dbChoice" "local"
+            write_config "dbUrl" "$DB_URL"
+        else
+            echo "❌ Invalid choice."
+            exit 1
+        fi
+        write_env_mongo_url "$APP_DIR" "$DB_URL"
+    fi
+
+    local RESPONSE
+    RESPONSE=$(curl -s -X POST "$API_URL" -H "Content-Type: application/json" -d "{\"email\":\"$EMAIL\",\"machineCode\":\"$MACHINE_CODE\"}")
+    echo "RESPONSE-REGISTERATION: $RESPONSE"
+
+    if [ -z "$RESPONSE" ]; then
+        echo "❌ License registration failed: Invalid response."
+        exit 1
+    fi
+
+    local LICENSE_KEY EMAIL_RES
+    LICENSE_KEY=$(echo "$RESPONSE" | yq eval '.license.licenseKey // ""')
+    EMAIL_RES=$(echo "$RESPONSE" | yq eval '.license.email // ""')
+    if [ -z "$LICENSE_KEY" ] || [ "$LICENSE_KEY" == "null" ] || [ -z "$EMAIL_RES" ] || [ "$EMAIL_RES" == "null" ]; then
+        echo "❌ License registration failed."
+        exit 1
+    fi
+
+    echo "{\"licenseKey\":\"$LICENSE_KEY\"}" > "$LICENSE_PATH"
+    chmod u+rw "$LICENSE_PATH"
+    echo "✅ License saved at $LICENSE_PATH"
+    if [ -n "$EMAIL_RES" ] && [ "$EMAIL_RES" != "null" ]; then
+        write_config "email" "$EMAIL_RES"
+    fi
+}
+
+# install_node() {
+#     local APP_DIR="$1"
+#     local NODE_VERSION
+
+#     if [ -n "$APP_DIR" ] && [ -f "$APP_DIR/.env" ]; then
+#         NODE_VERSION=$(grep -E '^NODE_VERSION=' "$APP_DIR/.env" | cut -d '=' -f2)
+#     fi
+#     NODE_VERSION=${NODE_VERSION:-$NODE_VERSION_DEFAULT}
+#     local NODE_MAJOR_VERSION
+#     NODE_MAJOR_VERSION=$(echo "$NODE_VERSION" | sed 's/v\([0-9]*\).*/\1/')
+
+#     if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+#         local CURRENT_VERSION
+#         CURRENT_VERSION=$(node -v | sed 's/v\([0-9]*\).*/\1/')
+#         echo "✅ Node.js version $CURRENT_VERSION.x found (expected $NODE_MAJOR_VERSION.x or higher)."
+#         return
+#     else
+#         echo "⚠ Node.js or npm not found."
+#     fi
+
+#     echo "📦 Installing Node.js LTS version..."
+#     local OS_TYPE
+#     OS_TYPE=$(uname -s | tr '[:upper:]' '[:lower:]')
+#     if [[ "$OS_TYPE" == *mingw* ]]; then
+#         OS_TYPE="windows"
+#     fi
+#     if [[ "$OS_TYPE" == "windows" ]]; then
+#         choco install -y nodejs-lts --source=https://community.chocolatey.org/api/v2/
+#         export PATH="$PATH:/c/Program Files/nodejs"
+#         pwsh "refreshenv"
+#     else
+#         echo "❌ Unsupported OS: $OS_TYPE"
+#         exit 1
+#     fi
+
+#     if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+#         local INSTALLED_VERSION
+#         INSTALLED_VERSION=$(node -v | sed 's/v\([0-9]*\).*/\1/')
+#         echo "✅ Node.js $INSTALLED_VERSION and npm $(npm -v) installed successfully."
+#     else
+#         echo "❌ Node.js or npm not found after installation. Check Chocolatey logs at C:/ProgramData/chocolatey/logs/chocolatey.log."
+#         exit 1
+#     fi
+# }
+
+install_node() {
+    local APP_DIR="$1"
+    
+    local NODE_VERSION
+
+    # --- Get NODE_VERSION from .env ---
+    if [ -n "$APP_DIR" ] && [ -f "$APP_DIR/.env" ]; then
+        NODE_VERSION=$(grep -E '^NODE_VERSION=' "$APP_DIR/.env" | cut -d '=' -f2)
+    fi
+    NODE_VERSION=${NODE_VERSION:-$NODE_VERSION_DEFAULT}
+
+    local NODE_MAJOR_VERSION
+    NODE_MAJOR_VERSION=$(echo "$NODE_VERSION" | sed 's/v\([0-9]*\).*/\1/')
+
+    # --- Check existing Node.js ---
+    if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+        local CURRENT_VERSION
+        CURRENT_VERSION=$(node -v | sed 's/v\([0-9]*\).*/\1/')
+        if [ "$CURRENT_VERSION" = "$NODE_MAJOR_VERSION" ]; then
+            echo "✅ Node.js version $CURRENT_VERSION.x already installed (found $(node -v))."
+            return
+        else
+            echo "⚠ Node.js version $CURRENT_VERSION found, but version $NODE_MAJOR_VERSION.x required."
+        fi
+    else
+        echo "⚠ Node.js or npm not found."
+    fi
+
+    echo "📦 Installing Node.js version $NODE_MAJOR_VERSION.x via Chocolatey..."
+
+    # --- Ensure Chocolatey is installed ---
+    if ! command -v choco >/dev/null 2>&1; then
+        echo "❌ Chocolatey not found. Please install Chocolatey first: https://chocolatey.org/install"
+        exit 1
+    fi
+
+    # --- Install the specific Node.js version ---
+    choco install -y nodejs --version "$NODE_MAJOR_VERSION.0.0" --source=https://community.chocolatey.org/api/v2/
+
+  export PATH="$PATH:/c/Program Files/nodejs"
+    pwsh "refreshenv"
+    # --- Verify installation ---
+    if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+        local INSTALLED_VERSION
+        INSTALLED_VERSION=$(node -v | sed 's/v\([0-9]*\).*/\1/')
+        if [ "$INSTALLED_VERSION" = "$NODE_MAJOR_VERSION" ]; then
+            echo "✅ Node.js $INSTALLED_VERSION and npm $(npm -v) installed successfully."
+        else
+            echo "⚠ Node.js installed, but version mismatch. Found $(node -v), expected $NODE_MAJOR_VERSION.x"
+        fi
+    else
+        echo "❌ Node.js or npm not found after installation. Check Chocolatey logs at C:/ProgramData/chocolatey/logs/chocolatey.log."
+        exit 1
+    fi
+}
+
+  setup_pm2_startup() {
+    # Get uname and normalize
+    local RAW_UNAME
+    RAW_UNAME=$(uname -s 2>/dev/null | tr '[:upper:]' '[:lower:]')
+
+    echo "🔍 Detected uname: $RAW_UNAME"
+
+    # Robust OS detection for Git Bash / Windows
+    if echo "$RAW_UNAME" | grep -Eq 'mingw|msys|cygwin'; then
+        OS_TYPE="windows"
+    else
+        OS_TYPE="unix"
+    fi
+
+    echo "🧭 OS Detected: $OS_TYPE"
+
+    if [[ "$OS_TYPE" == "windows" ]]; then
+        echo "💡 Detected Windows (Git Bash) environment."
+
+        # Ensure npm global bin path is accessible
+        local NPM_GLOBAL_BIN
+        NPM_GLOBAL_BIN=$(npm root -g 2>/dev/null)
+        NPM_GLOBAL_BIN="${NPM_GLOBAL_BIN%/node_modules}/.bin"
+        export PATH="$PATH:$NPM_GLOBAL_BIN"
+
+        # Ensure pm2-windows-startup is installed
+        if ! command -v pm2-windows-startup >/dev/null 2>&1; then
+            echo "📦 Installing pm2-windows-startup globally..."
+            npm install -g pm2-windows-startup || {
+                echo "❌ Failed to install pm2-windows-startup"
+                exit 1
+            }
+        fi
+
+        echo "▶️ Enabling PM2 startup on Windows..."
+        if ! pm2-windows-startup install 2>/dev/null; then
+            echo "⚠️ Unable to enable PM2 startup automatically."
+            echo "➡️ Please run this manually in an **Admin PowerShell**:"
+            echo "   pm2-windows-startup install"
+        else
+            echo "✅ PM2 startup successfully enabled for Windows."
+        fi
+
+    else
+        echo "💡 Detected Linux/macOS environment."
+        echo "▶️ Enabling PM2 startup..."
+        local CMD
+        CMD=$(pm2 startup | grep -v "sudo")
+        echo "⚙️ Running: $CMD"
+        eval "$CMD" || echo "⚠️ PM2 startup failed — check permissions."
+    fi
+}
+# check_pm2() {
+#     install_node ""
+#     if command -v pm2 >/dev/null 2>&1; then
+#         echo "✅ PM2 already installed."
+#     else
+#         echo "📦 Installing PM2 globally..."
+#         npm install -g pm2
+#         if command -v pm2 >/dev/null 2>&1; then
+#             echo "✅ PM2 installed."
+#             pm2 startup
+#         else
+#             echo "❌ Failed to install PM2."
+#             exit 1
+#         fi
+#     fi
+    
+# }
+check_pm2() {
+install_node ""
+local OS_TYPE=$(uname -s | tr '[:upper:]' '[:lower:]')
+if [[ "$OS_TYPE" == *mingw* ]]; then
+OS_TYPE="windows"
+fi
+if command -v pm2 >/dev/null 2>&1; then
+echo "✅ PM2 already installed."
+else
+echo "📦 Installing PM2 globally..."
+npm install -g pm2
+if command -v pm2 >/dev/null 2>&1; then
+echo "✅ PM2 installed."
+else
+echo "❌ Failed to install PM2."
+exit 1
+fi
+fi
+# setup_pm2_startup
+}
+install_and_start_mongodb() {
+    local OS_TYPE
+    OS_TYPE=$(uname -s | tr '[:upper:]' '[:lower:]')
+    if [[ "$OS_TYPE" == *mingw* ]]; then
+        OS_TYPE="windows"
+    fi
+
+    if command -v mongod >/dev/null 2>&1; then
+        echo "✅ MongoDB already installed."
+    else
+        echo "📦 Installing MongoDB $MONGODB_VERSION..."
+        if [[ "$OS_TYPE" == "windows" ]]; then
+            choco install -y mongodb --version "$MONGODB_VERSION.0"
+        else
+            echo "❌ Unsupported OS: $OS_TYPE"
+            exit 1
+        fi
+    fi
+
+    echo "▶️ Starting MongoDB service..."
+    if [[ "$OS_TYPE" == "windows" ]]; then
+        net start MongoDB || { echo "❌ Failed to start MongoDB"; exit 1; }
+    fi
+    sleep 5
+    if ps -ef | grep -q "mongod"; then
+        echo "✅ MongoDB running"
+        if command -v mongosh >/dev/null 2>&1; then
+            mongosh --eval "db.adminCommand('ping')" >/dev/null 2>&1 && echo "✅ MongoDB connection verified" || { echo "❌ MongoDB connection failed"; exit 1; }
+        else
+            echo "⚠ MongoDB shell not found, skipping connection test"
+        fi
+    else
+        echo "❌ MongoDB failed to start. Check logs."
+        exit 1
+    fi
+}
+
+update_license() {
+    local EMAIL="$1"
+    [ -z "$EMAIL" ] && EMAIL=$(prompt_for_email)
+    local MACHINE_CODE=$(get_machine_code)
+
+    if [ -f "$LICENSE_PATH" ]; then
+        local EXISTING_LICENSE_KEY
+        EXISTING_LICENSE_KEY=$(yq eval '.licenseKey // ""' "$LICENSE_PATH")
+        if [ -n "$EXISTING_LICENSE_KEY" ] && [ "$EXISTING_LICENSE_KEY" != "null" ]; then
+            echo "✅ License key already exists in $LICENSE_PATH. Skipping update."
+            return 0
+        fi
+    fi
+
+    local RESPONSE
+    RESPONSE=$(curl -s -X PATCH "$API_URL_UPDATE_LIC" -H "Content-Type: application/json" -d "{\"email\":\"$EMAIL\",\"machineCode\":\"$MACHINE_CODE\",\"licenseKey\":\"$OLD_LICENSE_KEY\"}")
+
+    if [ -z "$RESPONSE" ]; then
+        echo "❌ License update failed: Invalid response."
+        exit 1
+    fi
+
+    local NEW_LICENSE_KEY EMAIL_RES
+    NEW_LICENSE_KEY=$(echo "$RESPONSE" | yq eval '.newLicenseKey // ""')
+    EMAIL_RES=$(echo "$RESPONSE" | yq eval '.email // ""')
+    if [ -z "$NEW_LICENSE_KEY" ] || [ "$NEW_LICENSE_KEY" == "null" ] || [ -z "$EMAIL_RES" ] || [ "$EMAIL_RES" == "null" ]; then
+        echo "❌ License update failed."
+        exit 1
+    fi
+
+    echo "{\"licenseKey\":\"$NEW_LICENSE_KEY\"}" > "$LICENSE_PATH"
+    chmod u+rw "$LICENSE_PATH"
+    echo "✅ License updated and saved at $LICENSE_PATH"
+    if [ -n "$EMAIL_RES" ] && [ "$EMAIL_RES" != "null" ]; then
+        write_config "email" "$EMAIL_RES"
+    fi
+}
+
+validate_license_and_get_asset() {
+    local VERSION="${1:-}"
+    local LOG_FILE="$HOME/.myapp/logs/validate_license.log"
+    echo "🔍 Entering validate_license_and_get_asset with version: $VERSION" >> "$LOG_FILE"
+
+    if [ ! -f "$LICENSE_PATH" ]; then
+        echo "❌ License not found at $LICENSE_PATH. Please register first." >> "$LOG_FILE"
+        exit 1
+    fi
+    if [ ! -r "$LICENSE_PATH" ]; then
+        echo "❌ License file $LICENSE_PATH is not readable. Check permissions." >> "$LOG_FILE"
+        exit 1
+    fi
+
+    if [ ! -f "$CONFIG_PATH" ]; then
+        echo "❌ Config file not found at $CONFIG_PATH." >> "$LOG_FILE"
+        exit 1
+    fi
+    if [ ! -r "$CONFIG_PATH" ]; then
+        echo "❌ Config file $CONFIG_PATH is not readable. Check permissions." >> "$LOG_FILE"
+        exit 1
+    fi
+
+    local LICENSE_KEY=$(yq eval '.licenseKey // ""' "$LICENSE_PATH" 2>/dev/null || echo "")
+    local MACHINE_CODE=$(get_machine_code)
+    local INSTALLED_VERSION=$(yq eval '.installedVersion // "none"' "$CONFIG_PATH" 2>/dev/null || echo "none")
+    local VERSION_TO_SEND="${VERSION:-$INSTALLED_VERSION}"
+
+    if [ -z "$LICENSE_KEY" ]; then
+        echo "❌ Failed to read licenseKey from $LICENSE_PATH." >> "$LOG_FILE"
+        exit 1
+    fi
+
+    # Clean up values
+    LICENSE_KEY=$(echo "$LICENSE_KEY" | sed 's/^"//;s/"$//;s/\\//g' | xargs)
+    MACHINE_CODE=$(echo "$MACHINE_CODE" | xargs)
+    VERSION_TO_SEND=$(echo "$VERSION_TO_SEND" | sed 's/^"//;s/"$//;s/\\//g' | xargs)
+
+    echo "🔍 Debug: LICENSE_KEY='$LICENSE_KEY'" >> "$LOG_FILE"
+    echo "🔍 Debug: MACHINE_CODE='$MACHINE_CODE'" >> "$LOG_FILE"
+    echo "🔍 Debug: VERSION_TO_SEND='$VERSION_TO_SEND'" >> "$LOG_FILE"
+
+    local JSON_PAYLOAD
+    JSON_PAYLOAD=$(printf '{"licenseKey":"%s","machineCode":"%s","installedVersion":"%s"}' "$LICENSE_KEY" "$MACHINE_CODE" "$VERSION_TO_SEND")
+
+    if ! echo "$JSON_PAYLOAD" | yq eval '.' - > /dev/null 2>&1; then
+        echo "❌ Invalid JSON payload: $JSON_PAYLOAD" >> "$LOG_FILE"
+        exit 1
+    fi
+
+    echo "🔍 Sending request to $VALIDATE_API" >> "$LOG_FILE"
+    echo "🔍 Payload: $JSON_PAYLOAD" >> "$LOG_FILE"
+
+    local RESPONSE
+    RESPONSE=$(curl -s -X POST "$VALIDATE_API" -H "Content-Type: application/json" -d "$JSON_PAYLOAD" 2>/dev/null)
+
+    if [ -z "$RESPONSE" ]; then
+        echo "❌ License validation failed: Empty response from $VALIDATE_API" >> "$LOG_FILE"
+        exit 1
+    fi
+
+    echo "🔍 API Response: $RESPONSE" >> "$LOG_FILE"
+
+    local ERROR_MESSAGE
+    ERROR_MESSAGE=$(echo "$RESPONSE" | yq eval '.error // ""' - 2>/dev/null || echo "")
+    if [ -n "$ERROR_MESSAGE" ] && [ "$ERROR_MESSAGE" != "null" ]; then
+        local ERROR_DETAIL
+        ERROR_DETAIL=$(echo "$RESPONSE" | yq eval '.message // ""' - 2>/dev/null || echo "")
+        echo "❌ License validation failed: $ERROR_MESSAGE" >> "$LOG_FILE"
+        [ -n "$ERROR_DETAIL" ] && echo "   Details: $ERROR_DETAIL" >> "$LOG_FILE"
+        exit 1
+    fi
+
+    local VALID ASSET_URL
+    VALID=$(echo "$RESPONSE" | yq eval '.valid // "false"' - 2>/dev/null || echo "false")
+    ASSET_URL=$(echo "$RESPONSE" | yq eval '.asset // ""' - 2>/dev/null || echo "")
+
+    echo "🔍 Valid: $VALID" >> "$LOG_FILE"
+    echo "🔍 Asset URL: $ASSET_URL" >> "$LOG_FILE"
+
+    if [ "$VALID" != "true" ]; then
+        echo "❌ License invalid or expired." >> "$LOG_FILE"
+        exit 1
+    fi
+
+    if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" == "null" ] || ! echo "$ASSET_URL" | grep -qE '^https?://'; then
+        echo "❌ Invalid or missing asset URL: '$ASSET_URL'" >> "$LOG_FILE"
+        exit 1
+    fi
+
+    echo "$ASSET_URL"
+}
+check_latest_version() {
+    local RESPONSE=$(curl -s "$LATEST_VERSION_API")
+    if [ -z "$RESPONSE" ]; then
+        echo "❌ Failed to get latest version info."
+        exit 1
+    fi
+    local LATEST_VERSION=$(echo "$RESPONSE" | yq eval '.latestVerson // .latestVersion // ""')
+    if [ -z "$LATEST_VERSION" ] || [ "$LATEST_VERSION" == "null" ]; then
+        echo "❌ No latest version found."
+        exit 1
+    fi
+    echo "$LATEST_VERSION"
+}
+
+# check_update_and_install() {
+#     if [ ! -f "$CONFIG_PATH" ]; then
+#         echo "⚠ config.json not found. Creating default config..."
+#         create_default_config
+#     fi
+
+#     if ! yq -o=json '.' "$CONFIG_PATH" > /dev/null 2>&1; then
+#         echo "❌ config.json contains invalid JSON at $CONFIG_PATH. Recreating..."
+#         echo '{"autoUpdate": true, "installedVersion": "none"}' > "$CONFIG_PATH"
+#         chmod u+rw "$CONFIG_PATH"
+#     fi
+
+#     local AUTO_UPDATE=$(yq eval '.autoUpdate // true' "$CONFIG_PATH")
+#     local INSTALLED_VERSION=$(yq eval '.installedVersion // "none"' "$CONFIG_PATH")
+    
+#     # Clean up INSTALLED_VERSION - remove quotes and normalize
+#     INSTALLED_VERSION=$(echo "$INSTALLED_VERSION" | sed 's/^"//;s/"$//;s/\\//g' | xargs)
+#     if [ "$INSTALLED_VERSION" = "" ]; then
+#         INSTALLED_VERSION="none"
+#     fi
+
+#     if [ "$AUTO_UPDATE" != "true" ]; then
+#         echo "✅ Auto-update disabled. Keeping version: $INSTALLED_VERSION"
+#         return
+#     fi
+
+#     local LATEST_VERSION
+#     LATEST_VERSION=$(check_latest_version)
+#     LATEST_VERSION=$(echo "$LATEST_VERSION" | sed 's/^"//;s/"$//;s/\\//g' | xargs)
+
+#     local NORMALIZED_INSTALLED=$(echo "${INSTALLED_VERSION#v}" | tr -d '[:space:]')
+#     local NORMALIZED_LATEST=$(echo "${LATEST_VERSION#v}" | tr -d '[:space:]')
+
+#     echo "🔍 Debug: INSTALLED_VERSION='$INSTALLED_VERSION'"
+#     echo "🔍 Debug: LATEST_VERSION='$LATEST_VERSION'"
+#     echo "🔍 Debug: NORMALIZED_INSTALLED='$NORMALIZED_INSTALLED'"
+#     echo "🔍 Debug: NORMALIZED_LATEST='$NORMALIZED_LATEST'"
+
+#     if [ "$INSTALLED_VERSION" != "none" ] && [ "$NORMALIZED_INSTALLED" = "$NORMALIZED_LATEST" ]; then
+#         echo "✅ Already up to date! Installed version: $INSTALLED_VERSION"
+#         exit 0
+#     fi
+
+#     echo "📋 Current version: $INSTALLED_VERSION"
+#     echo "📋 Latest version: $LATEST_VERSION"
+#     echo "📦 Update available! Proceeding with update..."
+
+#     echo "🔍 Debug: Calling validate_license_and_get_asset with version '$LATEST_VERSION'..."
+#     local ASSET_URL
+#     # Temporarily disable set -e to capture errors
+#     set +e
+#     ASSET_URL=$(validate_license_and_get_asset "$LATEST_VERSION" 2>&1)
+#     local EXIT_CODE=$?
+#     set -e
+
+#     if [ $EXIT_CODE -ne 0 ]; then
+#         echo "❌ validate_license_and_get_asset failed with exit code $EXIT_CODE"
+#         echo "Output: $ASSET_URL"
+#         exit 1
+#     fi
+
+#     echo "✅ Retrieved asset URL: $ASSET_URL"
+    
+#     if [ -z "$ASSET_URL" ]; then
+#         echo "❌ Failed to get asset URL for update."
+#         exit 1
+#     fi
+
+#     local TMP_FILE="$HOME/.myapp/tmp_asset.tar.gz"
+#     echo "📥 Downloading from: $ASSET_URL"
+#     echo "📁 To temp file: $TMP_FILE"
+    
+#     curl -L "$ASSET_URL" -o "$TMP_FILE" || { 
+#         echo "❌ Failed to download release."
+#         rm -f "$TMP_FILE"
+#         exit 1
+#     }
+
+#     # Rest of the function remains unchanged...
+#     local FILENAME=$(basename "$ASSET_URL")
+#     local VERSION_NAME="${FILENAME%.tar.gz}"
+#     VERSION_NAME=${VERSION_NAME#hiretrack-}
+#     local OLD_DIR="$BACKUP_DIR/hiretrack-$INSTALLED_VERSION"
+
+#     if [ "$INSTALLED_VERSION" != "none" ] && [ -d "$APP_INSTALL_DIR" ] && [ "$(ls -A "$APP_INSTALL_DIR")" ]; then
+#         echo "📦 Backing up current version $INSTALLED_VERSION..."
+#         rm -rf "$OLD_DIR"
+#         cp -r "$APP_INSTALL_DIR" "$OLD_DIR"
+#         echo "✅ Backup created at $OLD_DIR"
+#     else
+#         echo "⚠️ No existing installation to backup."
+#     fi
+
+#     rm -rf "$APP_INSTALL_DIR"
+#     mkdir -p "$APP_INSTALL_DIR"
+#     7z x "$TMP_FILE" -o"$APP_INSTALL_DIR" -y || {
+#         echo "❌ Failed to extract release."
+#         rm "$TMP_FILE"
+#         if [ -d "$OLD_DIR" ]; then
+#             cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+#             pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+#         else
+#             pm2 kill || true
+#         fi
+#         exit 1
+#     }
+#     rm "$TMP_FILE"
+
+#     local DB_URL=$(yq eval '.dbUrl // ""' "$CONFIG_PATH" | sed 's/^"//;s/"$//')
+#     if [ -n "$DB_URL" ]; then
+#         write_env_mongo_url "$APP_INSTALL_DIR" "$DB_URL"
+#     fi
+
+#     write_config "installedVersion" "$VERSION_NAME"
+
+#     if [ ! -f "$APP_INSTALL_DIR/package.json" ]; then
+#         echo "❌ package.json not found. Aborting."
+#         rm -rf "$APP_INSTALL_DIR"
+#         if [ -d "$OLD_DIR" ]; then
+#             cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+#             pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+#         else
+#             pm2 kill || true
+#         fi
+#         exit 1
+#     fi
+
+#     install_node "$APP_INSTALL_DIR"
+#     local DB_CHOICE=$(yq eval '.dbChoice // ""' "$CONFIG_PATH" | sed 's/^"//;s/"$//')
+#     if [ "$DB_CHOICE" = "local" ]; then
+#         install_and_start_mongodb
+#     elif [ "$DB_CHOICE" = "atlas" ]; then
+#         echo "✅ Using MongoDB Atlas."
+#     else
+#         echo "❌ Invalid dbChoice."
+#         exit 1
+#     fi
+
+#     cd "$APP_INSTALL_DIR" || exit
+#     npm install --legacy-peer-deps || {
+#         echo "❌ npm install failed. Rolling back..."
+#         rm -rf "$APP_INSTALL_DIR"
+#         if [ -d "$OLD_DIR" ]; then
+#             cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+#             pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+#         else
+#             pm2 kill || true
+#         fi
+#         exit 1
+#     }
+
+#     echo "🚀 Starting new version with PM2..."
+#     if [ -n "$INSTALLED_VERSION" ] && [ "$INSTALLED_VERSION" != "none" ] && pm2 list | grep -q "hiretrack-$INSTALLED_VERSION"; then
+#         pm2 stop "hiretrack-$INSTALLED_VERSION" || true
+#         pm2 delete "hiretrack-$INSTALLED_VERSION" || true
+#         echo "🛑 Stopped and deleted old process hiretrack-$INSTALLED_VERSION"
+#     fi
+#     pm2 start "npm run start" --name "hiretrack-$VERSION_NAME" --cwd "$APP_INSTALL_DIR" || {
+#         echo "❌ Failed to start new version. Rolling back..."
+#         rm -rf "$APP_INSTALL_DIR"
+#         if [ -d "$OLD_DIR" ]; then
+#             cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+#             pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+#         else
+#             pm2 kill || true
+#         fi
+#         exit 1
+#     }
+#     pm2 save --force
+#     echo "✅ PM2 cleanup completed. Installed/Updated to $VERSION_NAME at $APP_INSTALL_DIR"
+
+#     if [ -d "$OLD_DIR" ]; then
+#         echo "🧹 Cleaning up old backup at $OLD_DIR..."
+#         rm -rf "$OLD_DIR"
+#     fi
+# }
+
+
+
+# check_update_and_install() {
+#     if [ ! -f "$CONFIG_PATH" ]; then
+#         echo "⚠ config.json not found. Creating default config..."
+#         create_default_config
+#     fi
+
+#     if ! yq -o=json '.' "$CONFIG_PATH" > /dev/null 2>&1; then
+#         echo "❌ config.json contains invalid JSON at $CONFIG_PATH. Recreating..."
+#         echo '{"autoUpdate": true, "installedVersion": "none"}' > "$CONFIG_PATH"
+#         chmod u+rw "$CONFIG_PATH"
+#     fi
+
+#     local AUTO_UPDATE=$(yq eval '.autoUpdate // true' "$CONFIG_PATH")
+#     local INSTALLED_VERSION=$(yq eval '.installedVersion // "none"' "$CONFIG_PATH")
+    
+#     INSTALLED_VERSION=$(echo "$INSTALLED_VERSION" | sed 's/^"//;s/"$//;s/\\//g' | xargs)
+#     if [ "$INSTALLED_VERSION" = "" ]; then
+#         INSTALLED_VERSION="none"
+#     fi
+
+#     if [ "$AUTO_UPDATE" != "true" ]; then
+#         echo "✅ Auto-update disabled. Keeping version: $INSTALLED_VERSION"
+#         return
+#     fi
+
+#     local LATEST_VERSION
+#     LATEST_VERSION=$(check_latest_version)
+#     LATEST_VERSION=$(echo "$LATEST_VERSION" | sed 's/^"//;s/"$//;s/\\//g' | xargs)
+
+#     local NORMALIZED_INSTALLED=$(echo "${INSTALLED_VERSION#v}" | tr -d '[:space:]')
+#     local NORMALIZED_LATEST=$(echo "${LATEST_VERSION#v}" | tr -d '[:space:]')
+
+#     echo "🔍 Debug: INSTALLED_VERSION='$INSTALLED_VERSION'"
+#     echo "🔍 Debug: LATEST_VERSION='$LATEST_VERSION'"
+#     echo "🔍 Debug: NORMALIZED_INSTALLED='$NORMALIZED_INSTALLED'"
+#     echo "🔍 Debug: NORMALIZED_LATEST='$NORMALIZED_LATEST'"
+
+#     if [ "$INSTALLED_VERSION" != "none" ] && [ "$NORMALIZED_INSTALLED" = "$NORMALIZED_LATEST" ]; then
+#         echo "✅ Already up to date! Installed version: $INSTALLED_VERSION"
+#         exit 0
+#     fi
+
+#     echo "📋 Current version: $INSTALLED_VERSION"
+#     echo "📋 Latest version: $LATEST_VERSION"
+#     echo "📦 Update available! Proceeding with update..."
+
+#     echo "🔍 Debug: Calling validate_license_and_get_asset with version '$LATEST_VERSION'..."
+#     local ASSET_URL
+#     set +e
+#     ASSET_URL=$(validate_license_and_get_asset "$LATEST_VERSION" 2>/dev/null)
+#     local EXIT_CODE=$?
+#     set -e
+
+#     if [ $EXIT_CODE -ne 0 ]; then
+#         echo "❌ validate_license_and_get_asset failed with exit code $EXIT_CODE"
+#         local ERROR_OUTPUT=$(validate_license_and_get_asset "$LATEST_VERSION" 2>&1 >/dev/null)
+#         echo "Error Output: $ERROR_OUTPUT"
+#         exit 1
+#     fi
+
+#     echo "✅ Retrieved asset URL: $ASSET_URL"
+    
+#     if [ -z "$ASSET_URL" ]; then
+#         echo "❌ Failed to get asset URL for update."
+#         exit 1
+#     fi
+
+#     local TMP_FILE="$HOME/.myapp/tmp_asset.tar.gz"
+#     echo "📥 Downloading from: $ASSET_URL"
+#     echo "📁 To temp file: $TMP_FILE"
+    
+#     curl -L "$ASSET_URL" -o "$TMP_FILE" || { 
+#         echo "❌ Failed to download release."
+#         rm -f "$TMP_FILE"
+#         exit 1
+#     }
+
+#     local FILENAME=$(basename "$ASSET_URL")
+#     local VERSION_NAME="${FILENAME%.tar.gz}"
+#     VERSION_NAME=${VERSION_NAME#hiretrack-}
+#     local OLD_DIR="$BACKUP_DIR/hiretrack-$INSTALLED_VERSION"
+
+#     if [ "$INSTALLED_VERSION" != "none" ] && [ -d "$APP_INSTALL_DIR" ] && [ "$(ls -A "$APP_INSTALL_DIR")" ]; then
+#         echo "📦 Backing up current version $INSTALLED_VERSION..."
+#         rm -rf "$OLD_DIR"
+#         cp -r "$APP_INSTALL_DIR" "$OLD_DIR"
+#         echo "✅ Backup created at $OLD_DIR"
+#     else
+#         echo "⚠️ No existing installation to backup."
+#     fi
+
+#     rm -rf "$APP_INSTALL_DIR"
+#     mkdir -p "$APP_INSTALL_DIR"
+#     echo "🔍 Debug: Extracting gzip layer from $TMP_FILE to $APP_INSTALL_DIR"
+#     7z x "$TMP_FILE" -o"$APP_INSTALL_DIR" -y > "$HOME/.myapp/extract_gzip.log" 2>&1 || {
+#         echo "❌ Failed to extract gzip layer. Check $HOME/.myapp/extract_gzip.log"
+#         cat "$HOME/.myapp/extract_gzip.log"
+#         rm -f "$TMP_FILE"
+#         if [ -d "$OLD_DIR" ]; then
+#             cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+#             pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+#         else
+#             pm2 kill || true
+#         fi
+#         exit 1
+#     }
+
+#     local TAR_FILE="$APP_INSTALL_DIR/$(basename "$TMP_FILE" .gz)"
+#     if [ -f "$TAR_FILE" ]; then
+#         echo "📂 Extracting inner tar: $TAR_FILE"
+#         7z x "$TAR_FILE" -o"$APP_INSTALL_DIR" -y > "$HOME/.myapp/extract_tar.log" 2>&1 || {
+#             echo "❌ Failed to extract tar layer. Check $HOME/.myapp/extract_tar.log"
+#             cat "$HOME/.myapp/extract_tar.log"
+#             rm -f "$TAR_FILE"
+#             rm -f "$TMP_FILE"
+#             rm -rf "$APP_INSTALL_DIR"
+#             if [ -d "$OLD_DIR" ]; then
+#                 cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+#                 pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+#             else
+#                 pm2 kill || true
+#             fi
+#             exit 1
+#         }
+#         echo "✅ Inner tar extracted"
+#         rm -f "$TAR_FILE"
+#     else
+#         echo "⚠ No inner tar file found after gzip extraction. Listing contents of $APP_INSTALL_DIR:"
+#         ls -R "$APP_INSTALL_DIR"
+#     fi
+#     rm -f "$TMP_FILE"
+
+#     shopt -s nullglob
+#     SUBDIRS=("$APP_INSTALL_DIR"/*/)
+#     shopt -u nullglob
+
+#     if [ ${#SUBDIRS[@]} -eq 1 ] && [ -d "${SUBDIRS[0]}" ]; then
+#         echo "📂 Detected subdirectory ${SUBDIRS[0]} in $APP_INSTALL_DIR, moving contents..."
+#         mv "${SUBDIRS[0]}"* "$APP_INSTALL_DIR/" || {
+#             echo "❌ Failed to move subdirectory contents."
+#             rm -rf "$APP_INSTALL_DIR"
+#             if [ -d "$OLD_DIR" ]; then
+#                 cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+#                 pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+#             else
+#                 pm2 kill || true
+#             fi
+#             exit 1
+#         }
+#         mv "${SUBDIRS[0]}".* "$APP_INSTALL_DIR/" 2>/dev/null || true
+#         rmdir "${SUBDIRS[0]}" 2>/dev/null || true
+#         echo "✅ Moved contents to $APP_INSTALL_DIR"
+#     fi
+
+#     local DB_URL=$(yq eval '.dbUrl // ""' "$CONFIG_PATH" | sed 's/^"//;s/"$//')
+#     if [ -n "$DB_URL" ]; then
+#         write_env_mongo_url "$APP_INSTALL_DIR" "$DB_URL"
+#     fi
+
+#     write_config "installedVersion" "$VERSION_NAME"
+
+#     if [ ! -f "$APP_INSTALL_DIR/package.json" ]; then
+#         echo "❌ package.json not found in $APP_INSTALL_DIR. Aborting."
+#         echo "📋 Directory contents:"
+#         ls -R "$APP_INSTALL_DIR"
+#         rm -rf "$APP_INSTALL_DIR"
+#         if [ -d "$OLD_DIR" ]; then
+#             cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+#             pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+#         else
+#             pm2 kill || true
+#         fi
+#         exit 1
+#     fi
+
+#     # Validate Node.js environment
+#     echo "🔍 Validating Node.js environment..."
+#     if ! command -v node >/dev/null 2>&1; then
+#         echo "❌ Node.js not found. Attempting to install..."
+#         install_node "$APP_INSTALL_DIR"
+#     fi
+#     local NODE_PATH=$(which node 2>/dev/null)
+#     if [ -z "$NODE_PATH" ]; then
+#         echo "❌ Node.js executable not found. Aborting."
+#         rm -rf "$APP_INSTALL_DIR"
+#         if [ -d "$OLD_DIR" ]; then
+#             cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+#             pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+#         else
+#             pm2 kill || true
+#         fi
+#         exit 1
+#     fi
+#     echo "✅ Node.js found at: $NODE_PATH"
+
+#     # Install dependencies before validating start script
+#     cd "$APP_INSTALL_DIR" || exit
+#     echo "📦 Running npm install --legacy-peer-deps..."
+#     npm install --legacy-peer-deps > "$HOME/.myapp/npm_install.log" 2>&1 || {
+#         echo "❌ npm install --legacy-peer-deps failed. Check $HOME/.myapp/npm_install.log"
+#         cat "$HOME/.myapp/npm_install.log"
+#         pm2 kill || true
+#         sleep 2
+#         rm -rf "$APP_INSTALL_DIR" || {
+#             echo "⚠ Rollback failed: Device or resource busy. Attempting to force..."
+#             taskkill /IM node.exe /F 2>/dev/null || true
+#             sleep 2
+#             rm -rf "$APP_INSTALL_DIR" || echo "❌ Failed to remove $APP_INSTALL_DIR. Please manually delete it."
+#         }
+#         if [ -d "$OLD_DIR" ]; then
+#             cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+#             pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+#         else
+#             pm2 kill || true
+#         fi
+#         exit 1
+#     }
+#     echo "✅ npm install completed"
+
+#     # Validate package.json start script
+#     echo "🔍 Validating package.json start script..."
+#     local START_SCRIPT
+#     START_SCRIPT=$(yq eval '.scripts.start // ""' "$APP_INSTALL_DIR/package.json" 2>/dev/null | sed 's/^"//;s/"$//')
+#     if [ -z "$START_SCRIPT" ]; then
+#         echo "❌ No 'start' script found in $APP_INSTALL_DIR/package.json. Aborting."
+#         echo "📋 package.json contents:"
+#         cat "$APP_INSTALL_DIR/package.json"
+#         rm -rf "$APP_INSTALL_DIR"
+#         if [ -d "$OLD_DIR" ]; then
+#             cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+#             pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+#         else
+#             pm2 kill || true
+#         fi
+#         exit 1
+#     fi
+#     echo "✅ Found start script: $START_SCRIPT"
+
+#     # Test the start script
+#     echo "🔍 Testing npm run start..."
+#     set +e
+#     npm run start --dry-run > "$HOME/.myapp/npm_start.log" 2>&1
+#     local NPM_EXIT_CODE=$?
+#     set -e
+#     if [ $NPM_EXIT_CODE -ne 0 ]; then
+#         echo "❌ npm run start failed. Check $HOME/.myapp/npm_start.log"
+#         cat "$HOME/.myapp/npm_start.log"
+#         rm -rf "$APP_INSTALL_DIR"
+#         if [ -d "$OLD_DIR" ]; then
+#             cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+#             pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+#         else
+#             pm2 kill || true
+#         fi
+#         exit 1
+#     fi
+#     echo "✅ npm run start test passed"
+
+#     local DB_CHOICE=$(yq eval '.dbChoice // ""' "$CONFIG_PATH" | sed 's/^"//;s/"$//')
+#     if [ "$DB_CHOICE" = "local" ]; then
+#         install_and_start_mongodb
+#     elif [ "$DB_CHOICE" = "atlas" ]; then
+#         echo "✅ Using MongoDB Atlas."
+#     else
+#         echo "❌ Invalid dbChoice."
+#         exit 1
+#     fi
+
+#     echo "🚀 Starting new version with PM2..."
+#     if [ -n "$INSTALLED_VERSION" ] && [ "$INSTALLED_VERSION" != "none" ] && pm2 list | grep -q "hiretrack-$INSTALLED_VERSION"; then
+#         pm2 stop "hiretrack-$INSTALLED_VERSION" || true
+#         pm2 delete "hiretrack-$INSTALLED_VERSION" || true
+#         echo "🛑 Stopped and deleted old process hiretrack-$INSTALLED_VERSION"
+#     fi
+#     pm2 start "npm run start" --name "hiretrack-$VERSION_NAME" --cwd "$APP_INSTALL_DIR" || {
+#         echo "❌ Failed to start new version. Rolling back..."
+#         pm2 kill || true
+#         sleep 2
+#         rm -rf "$APP_INSTALL_DIR" || {
+#             echo "⚠ Rollback failed: Device or resource busy. Attempting to force..."
+#             taskkill /IM node.exe /F 2>/dev/null || true
+#             sleep 2
+#             rm -rf "$APP_INSTALL_DIR" || echo "❌ Failed to remove $APP_INSTALL_DIR. Please manually delete it."
+#         }
+#         if [ -d "$OLD_DIR" ]; then
+#             cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+#             pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+#         else
+#             pm2 kill || true
+#         fi
+#         exit 1
+#     }
+#     pm2 save --force
+#     echo "✅ PM2 cleanup completed. Installed/Updated to $VERSION_NAME at $APP_INSTALL_DIR"
+
+#     if [ -d "$OLD_DIR" ]; then
+#         echo "🧹 Cleaning up old backup at $OLD_DIR..."
+#         rm -rf "$OLD_DIR"
+#     fi
+# }
+
+
+
+
+# check_update_and_install() {
+#     if [ ! -f "$CONFIG_PATH" ]; then
+#         echo "⚠ config.json not found. Creating default config..."
+#         create_default_config
+#     fi
+
+#     if ! yq -o=json '.' "$CONFIG_PATH" > /dev/null 2>&1; then
+#         echo "❌ config.json contains invalid JSON at $CONFIG_PATH. Recreating..."
+#         echo '{"autoUpdate": true, "installedVersion": "none"}' > "$CONFIG_PATH"
+#         chmod u+rw "$CONFIG_PATH"
+#     fi
+
+#     local AUTO_UPDATE=$(yq eval '.autoUpdate // true' "$CONFIG_PATH")
+#     local INSTALLED_VERSION=$(yq eval '.installedVersion // "none"' "$CONFIG_PATH")
+    
+#     INSTALLED_VERSION=$(echo "$INSTALLED_VERSION" | sed 's/^"//;s/"$//;s/\\//g' | xargs)
+#     if [ "$INSTALLED_VERSION" = "" ]; then
+#         INSTALLED_VERSION="none"
+#     fi
+
+#     if [ "$AUTO_UPDATE" != "true" ]; then
+#         echo "✅ Auto-update disabled. Keeping version: $INSTALLED_VERSION"
+#         return
+#     fi
+
+#     local LATEST_VERSION
+#     LATEST_VERSION=$(check_latest_version)
+#     LATEST_VERSION=$(echo "$LATEST_VERSION" | sed 's/^"//;s/"$//;s/\\//g' | xargs)
+
+#     local NORMALIZED_INSTALLED=$(echo "${INSTALLED_VERSION#v}" | tr -d '[:space:]')
+#     local NORMALIZED_LATEST=$(echo "${LATEST_VERSION#v}" | tr -d '[:space:]')
+
+#     echo "🔍 Debug: INSTALLED_VERSION='$INSTALLED_VERSION'"
+#     echo "🔍 Debug: LATEST_VERSION='$LATEST_VERSION'"
+#     echo "🔍 Debug: NORMALIZED_INSTALLED='$NORMALIZED_INSTALLED'"
+#     echo "🔍 Debug: NORMALIZED_LATEST='$NORMALIZED_LATEST'"
+
+#     if [ "$INSTALLED_VERSION" != "none" ] && [ "$NORMALIZED_INSTALLED" = "$NORMALIZED_LATEST" ]; then
+#         echo "✅ Already up to date! Installed version: $INSTALLED_VERSION"
+#         exit 0
+#     fi
+
+#     echo "📋 Current version: $INSTALLED_VERSION"
+#     echo "📋 Latest version: $LATEST_VERSION"
+#     echo "📦 Update available! Proceeding with update..."
+
+#     echo "🔍 Debug: Calling validate_license_and_get_asset with version '$LATEST_VERSION'..."
+#     local ASSET_URL
+#     set +e
+#     ASSET_URL=$(validate_license_and_get_asset "$LATEST_VERSION" 2>/dev/null)
+#     local EXIT_CODE=$?
+#     set -e
+
+#     if [ $EXIT_CODE -ne 0 ]; then
+#         echo "❌ validate_license_and_get_asset failed with exit code $EXIT_CODE"
+#         local ERROR_OUTPUT=$(validate_license_and_get_asset "$LATEST_VERSION" 2>&1 >/dev/null)
+#         echo "Error Output: $ERROR_OUTPUT"
+#         exit 1
+#     fi
+
+#     echo "✅ Retrieved asset URL: $ASSET_URL"
+    
+#     if [ -z "$ASSET_URL" ]; then
+#         echo "❌ Failed to get asset URL for update."
+#         exit 1
+#     fi
+
+#     local TMP_FILE="$HOME/.myapp/tmp_asset.tar.gz"
+#     echo "📥 Downloading from: $ASSET_URL"
+#     echo "📁 To temp file: $TMP_FILE"
+    
+#     curl -L "$ASSET_URL" -o "$TMP_FILE" || { 
+#         echo "❌ Failed to download release."
+#         rm -f "$TMP_FILE"
+#         exit 1
+#     }
+
+#     local FILENAME=$(basename "$ASSET_URL")
+#     local VERSION_NAME="${FILENAME%.tar.gz}"
+#     VERSION_NAME=${VERSION_NAME#hiretrack-}
+#     local OLD_DIR="$BACKUP_DIR/hiretrack-$INSTALLED_VERSION"
+
+#     if [ "$INSTALLED_VERSION" != "none" ] && [ -d "$APP_INSTALL_DIR" ] && [ "$(ls -A "$APP_INSTALL_DIR")" ]; then
+#         echo "📦 Backing up current version $INSTALLED_VERSION..."
+#         rm -rf "$OLD_DIR"
+#         cp -r "$APP_INSTALL_DIR" "$OLD_DIR"
+#         echo "✅ Backup created at $OLD_DIR"
+#     else
+#         echo "⚠️ No existing installation to backup."
+#     fi
+
+#     rm -rf "$APP_INSTALL_DIR"
+#     mkdir -p "$APP_INSTALL_DIR"
+#     echo "🔍 Debug: Extracting gzip layer from $TMP_FILE to $APP_INSTALL_DIR"
+#     7z x "$TMP_FILE" -o"$APP_INSTALL_DIR" -y > "$HOME/.myapp/extract_gzip.log" 2>&1 || {
+#         echo "❌ Failed to extract gzip layer. Check $HOME/.myapp/extract_gzip.log"
+#         cat "$HOME/.myapp/extract_gzip.log"
+#         rm -f "$TMP_FILE"
+#         if [ -d "$OLD_DIR" ]; then
+#             cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+#             pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+#         else
+#             pm2 kill || true
+#         fi
+#         exit 1
+#     }
+
+#     local TAR_FILE="$APP_INSTALL_DIR/$(basename "$TMP_FILE" .gz)"
+#     if [ -f "$TAR_FILE" ]; then
+#         echo "📂 Extracting inner tar: $TAR_FILE"
+#         7z x "$TAR_FILE" -o"$APP_INSTALL_DIR" -y > "$HOME/.myapp/extract_tar.log" 2>&1 || {
+#             echo "❌ Failed to extract tar layer. Check $HOME/.myapp/extract_tar.log"
+#             cat "$HOME/.myapp/extract_tar.log"
+#             rm -f "$TAR_FILE"
+#             rm -f "$TMP_FILE"
+#             rm -rf "$APP_INSTALL_DIR"
+#             if [ -d "$OLD_DIR" ]; then
+#                 cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+#                 pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+#             else
+#                 pm2 kill || true
+#             fi
+#             exit 1
+#         }
+#         echo "✅ Inner tar extracted"
+#         rm -f "$TAR_FILE"
+#     else
+#         echo "⚠ No inner tar file found after gzip extraction. Listing contents of $APP_INSTALL_DIR:"
+#         ls -R "$APP_INSTALL_DIR"
+#     fi
+#     rm -f "$TMP_FILE"
+
+#     shopt -s nullglob
+#     SUBDIRS=("$APP_INSTALL_DIR"/*/)
+#     shopt -u nullglob
+
+#     if [ ${#SUBDIRS[@]} -eq 1 ] && [ -d "${SUBDIRS[0]}" ]; then
+#         echo "📂 Detected subdirectory ${SUBDIRS[0]} in $APP_INSTALL_DIR, moving contents..."
+#         mv "${SUBDIRS[0]}"* "$APP_INSTALL_DIR/" || {
+#             echo "❌ Failed to move subdirectory contents."
+#             rm -rf "$APP_INSTALL_DIR"
+#             if [ -d "$OLD_DIR" ]; then
+#                 cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+#                 pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+#             else
+#                 pm2 kill || true
+#             fi
+#             exit 1
+#         }
+#         mv "${SUBDIRS[0]}".* "$APP_INSTALL_DIR/" 2>/dev/null || true
+#         rmdir "${SUBDIRS[0]}" 2>/dev/null || true
+#         echo "✅ Moved contents to $APP_INSTALL_DIR"
+#     fi
+
+#     local DB_URL=$(yq eval '.dbUrl // ""' "$CONFIG_PATH" | sed 's/^"//;s/"$//')
+#     if [ -n "$DB_URL" ]; then
+#         write_env_mongo_url "$APP_INSTALL_DIR" "$DB_URL"
+#     fi
+
+#     write_config "installedVersion" "$VERSION_NAME"
+
+#     if [ ! -f "$APP_INSTALL_DIR/package.json" ]; then
+#         echo "❌ package.json not found in $APP_INSTALL_DIR. Aborting."
+#         echo "📋 Directory contents:"
+#         ls -R "$APP_INSTALL_DIR"
+#         rm -rf "$APP_INSTALL_DIR"
+#         if [ -d "$OLD_DIR" ]; then
+#             cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+#             pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+#         else
+#             pm2 kill || true
+#         fi
+#         exit 1
+#     fi
+
+#     # Validate Node.js environment
+#     echo "🔍 Validating Node.js environment..."
+#     if ! command -v node >/dev/null 2>&1; then
+#         echo "❌ Node.js not found. Attempting to install..."
+#         install_node "$APP_INSTALL_DIR"
+#     fi
+#     local NODE_PATH=$(which node 2>/dev/null)
+#     if [ -z "$NODE_PATH" ]; then
+#         echo "❌ Node.js executable not found. Aborting."
+#         rm -rf "$APP_INSTALL_DIR"
+#         if [ -d "$OLD_DIR" ]; then
+#             cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+#             pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+#         else
+#             pm2 kill || true
+#         fi
+#         exit 1
+#     fi
+#     echo "✅ Node.js found at: $NODE_PATH"
+
+#     # Install dependencies
+#     cd "$APP_INSTALL_DIR" || exit
+#     echo "📦 Running npm install --legacy-peer-deps..."
+#     set +e
+#     npm install --legacy-peer-deps > /dev/null 2>&1 || {
+#         echo "❌ npm install --legacy-peer-deps failed. Check PM2 logs for details."
+#         pm2 logs --lines 100 > "$HOME/.myapp/npm_install_error.log" 2>&1
+#         cat "$HOME/.myapp/npm_install_error.log"
+#         pm2 kill || true
+#         sleep 2
+#         rm -rf "$APP_INSTALL_DIR" || {
+#             echo "⚠ Rollback failed: Device or resource busy. Attempting to force..."
+#             taskkill /IM node.exe /F 2>/dev/null || true
+#             sleep 2
+#             rm -rf "$APP_INSTALL_DIR" || echo "❌ Failed to remove $APP_INSTALL_DIR. Please manually delete it."
+#         }
+#         if [ -d "$OLD_DIR" ]; then
+#             cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+#             pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+#         else
+#             pm2 kill || true
+#         fi
+#         exit 1
+#     }
+#     echo "✅ npm install completed"
+
+#     # Validate package.json start script
+#     echo "🔍 Validating package.json start script..."
+#     local START_SCRIPT
+#     START_SCRIPT=$(yq eval '.scripts.start // ""' "$APP_INSTALL_DIR/package.json" 2>/dev/null | sed 's/^"//;s/"$//')
+#     if [ -z "$START_SCRIPT" ]; then
+#         echo "❌ No 'start' script found in $APP_INSTALL_DIR/package.json. Aborting."
+#         echo "📋 package.json contents:"
+#         cat "$APP_INSTALL_DIR/package.json"
+#         rm -rf "$APP_INSTALL_DIR"
+#         if [ -d "$OLD_DIR" ]; then
+#             cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+#             pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+#         else
+#             pm2 kill || true
+#         fi
+#         exit 1
+#     fi
+#     echo "✅ Found start script: $START_SCRIPT"
+
+#     # Verify .next directory exists
+#     if [[ "$START_SCRIPT" == *"next start"* ]] && [ ! -d "$APP_INSTALL_DIR/.next" ]; then
+#         echo "❌ .next directory not found in $APP_INSTALL_DIR. Aborting."
+#         echo "📋 Directory contents:"
+#         ls -R "$APP_INSTALL_DIR"
+#         rm -rf "$APP_INSTALL_DIR"
+#         if [ -d "$OLD_DIR" ]; then
+#             cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+#             pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+#         else
+#             pm2 kill || true
+#         fi
+#         exit 1
+#     fi
+
+#     # Test the start script
+#     echo "🔍 Testing npm run start..."
+#     set +e
+#     npm run start --dry-run > /dev/null 2>&1
+#     local NPM_EXIT_CODE=$?
+#     set -e
+#     if [ $NPM_EXIT_CODE -ne 0 ]; then
+#         echo "❌ npm run start failed. Check PM2 logs for details."
+#         pm2 logs --lines 100 > "$HOME/.myapp/npm_start_error.log" 2>&1
+#         cat "$HOME/.myapp/npm_start_error.log"
+#         rm -rf "$APP_INSTALL_DIR"
+#         if [ -d "$OLD_DIR" ]; then
+#             cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+#             pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+#         else
+#             pm2 kill || true
+#         fi
+#         exit 1
+#     fi
+#     echo "✅ npm run start test passed"
+
+#     local DB_CHOICE=$(yq eval '.dbChoice // ""' "$CONFIG_PATH" | sed 's/^"//;s/"$//')
+#     if [ "$DB_CHOICE" = "local" ]; then
+#         install_and_start_mongodb
+#     elif [ "$DB_CHOICE" = "atlas" ]; then
+#         echo "✅ Using MongoDB Atlas."
+#     else
+#         echo "❌ Invalid dbChoice."
+#         exit 1
+#     fi
+
+#     echo "🚀 Starting new version with PM2..."
+#     if [ -n "$INSTALLED_VERSION" ] && [ "$INSTALLED_VERSION" != "none" ] && pm2 list | grep -q "hiretrack-$INSTALLED_VERSION"; then
+#         pm2 stop "hiretrack-$INSTALLED_VERSION" || true
+#         pm2 delete "hiretrack-$INSTALLED_VERSION" || true
+#         echo "🛑 Stopped and deleted old process hiretrack-$INSTALLED_VERSION"
+#     fi
+#     pm2 start "npm run start" --name "hiretrack-$VERSION_NAME" --cwd "$APP_INSTALL_DIR" --log "$HOME/.myapp/pm2.log" || {
+#         echo "❌ Failed to start new version. Check $HOME/.myapp/pm2.log for details."
+#         pm2 logs --lines 100 >> "$HOME/.myapp/pm2.log" 2>&1
+#         cat "$HOME/.myapp/pm2.log"
+#         pm2 kill || true
+#         sleep 2
+#         rm -rf "$APP_INSTALL_DIR" || {
+#             echo "⚠ Rollback failed: Device or resource busy. Attempting to force..."
+#             taskkill /IM node.exe /F 2>/dev/null || true
+#             sleep 2
+#             rm -rf "$APP_INSTALL_DIR" || echo "❌ Failed to remove $APP_INSTALL_DIR. Please manually delete it."
+#         }
+#         if [ -d "$OLD_DIR" ]; then
+#             cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+#             pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+#         else
+#             pm2 kill || true
+#         fi
+#         exit 1
+#     }
+#     pm2 save --force
+#     echo "✅ PM2 process saved. Ensuring persistence across terminal sessions..."
+#     pm2 startup | grep -v "sudo" | bash || true
+#     echo "✅ PM2 cleanup completed. Installed/Updated to $VERSION_NAME at $APP_INSTALL_DIR"
+
+#     if [ -d "$OLD_DIR" ]; then
+#         echo "🧹 Cleaning up old backup at $OLD_DIR..."
+#         rm -rf "$OLD_DIR"
+#     fi
+# }
+
+
+
+# check_update_and_install() {
+#     if [ ! -f "$CONFIG_PATH" ]; then
+#         echo "⚠ config.json not found. Creating default config..."
+#         create_default_config
+#     fi
+
+#     if ! yq -o=json '.' "$CONFIG_PATH" > /dev/null 2>&1; then
+#         echo "❌ config.json contains invalid JSON at $CONFIG_PATH. Recreating..."
+#         echo '{"autoUpdate": true, "installedVersion": "none"}' > "$CONFIG_PATH"
+#         chmod u+rw "$CONFIG_PATH"
+#     fi
+
+#     local AUTO_UPDATE=$(yq eval '.autoUpdate // true' "$CONFIG_PATH")
+#     local INSTALLED_VERSION=$(yq eval '.installedVersion // "none"' "$CONFIG_PATH")
+    
+#     INSTALLED_VERSION=$(echo "$INSTALLED_VERSION" | sed 's/^"//;s/"$//;s/\\//g' | xargs)
+#     if [ "$INSTALLED_VERSION" = "" ]; then
+#         INSTALLED_VERSION="none"
+#     fi
+
+#     if [ "$AUTO_UPDATE" != "true" ]; then
+#         echo "✅ Auto-update disabled. Keeping version: $INSTALLED_VERSION"
+#         return
+#     fi
+
+#     local LATEST_VERSION
+#     LATEST_VERSION=$(check_latest_version)
+#     LATEST_VERSION=$(echo "$LATEST_VERSION" | sed 's/^"//;s/"$//;s/\\//g' | xargs)
+
+#     local NORMALIZED_INSTALLED=$(echo "${INSTALLED_VERSION#v}" | tr -d '[:space:]')
+#     local NORMALIZED_LATEST=$(echo "${LATEST_VERSION#v}" | tr -d '[:space:]')
+
+#     echo "🔍 Debug: INSTALLED_VERSION='$INSTALLED_VERSION'"
+#     echo "🔍 Debug: LATEST_VERSION='$LATEST_VERSION'"
+#     echo "🔍 Debug: NORMALIZED_INSTALLED='$NORMALIZED_INSTALLED'"
+#     echo "🔍 Debug: NORMALIZED_LATEST='$NORMALIZED_LATEST'"
+
+#     if [ "$INSTALLED_VERSION" != "none" ] && [ "$NORMALIZED_INSTALLED" = "$NORMALIZED_LATEST" ]; then
+#         echo "✅ Already up to date! Installed version: $INSTALLED_VERSION"
+#         exit 0
+#     fi
+
+#     echo "📋 Current version: $INSTALLED_VERSION"
+#     echo "📋 Latest version: $LATEST_VERSION"
+#     echo "📦 Update available! Proceeding with update..."
+
+#     echo "🔍 Debug: Calling validate_license_and_get_asset with version '$LATEST_VERSION'..."
+#     local ASSET_URL
+#     set +e
+#     ASSET_URL=$(validate_license_and_get_asset "$LATEST_VERSION" 2>/dev/null)
+#     local EXIT_CODE=$?
+#     set -e
+
+#     if [ $EXIT_CODE -ne 0 ]; then
+#         echo "❌ validate_license_and_get_asset failed with exit code $EXIT_CODE"
+#         local ERROR_OUTPUT=$(validate_license_and_get_asset "$LATEST_VERSION" 2>&1 >/dev/null)
+#         echo "Error Output: $ERROR_OUTPUT"
+#         exit 1
+#     fi
+
+#     echo "✅ Retrieved asset URL: $ASSET_URL"
+    
+#     if [ -z "$ASSET_URL" ]; then
+#         echo "❌ Failed to get asset URL for update."
+#         exit 1
+#     fi
+
+#     local TMP_FILE="$HOME/.myapp/tmp_asset.tar.gz"
+#     echo "📥 Downloading from: $ASSET_URL"
+#     echo "📁 To temp file: $TMP_FILE"
+    
+#     curl -L "$ASSET_URL" -o "$TMP_FILE" || { 
+#         echo "❌ Failed to download release."
+#         rm -f "$TMP_FILE"
+#         exit 1
+#     }
+
+#     local FILENAME=$(basename "$ASSET_URL")
+#     local VERSION_NAME="${FILENAME%.tar.gz}"
+#     VERSION_NAME=${VERSION_NAME#hiretrack-}
+#     local OLD_DIR="$BACKUP_DIR/hiretrack-$INSTALLED_VERSION"
+
+#     if [ "$INSTALLED_VERSION" != "none" ] && [ -d "$APP_INSTALL_DIR" ] && [ "$(ls -A "$APP_INSTALL_DIR")" ]; then
+#         echo "📦 Backing up current version $INSTALLED_VERSION..."
+#         rm -rf "$OLD_DIR"
+#         cp -r "$APP_INSTALL_DIR" "$OLD_DIR"
+#         echo "✅ Backup created at $OLD_DIR"
+#     else
+#         echo "⚠️ No existing installation to backup."
+#     fi
+
+#     rm -rf "$APP_INSTALL_DIR"
+#     mkdir -p "$APP_INSTALL_DIR"
+#     echo "🔍 Debug: Extracting gzip layer from $TMP_FILE to $APP_INSTALL_DIR"
+#     7z x "$TMP_FILE" -o"$APP_INSTALL_DIR" -y > "$HOME/.myapp/extract_gzip.log" 2>&1 || {
+#         echo "❌ Failed to extract gzip layer. Check $HOME/.myapp/extract_gzip.log"
+#         cat "$HOME/.myapp/extract_gzip.log"
+#         rm -f "$TMP_FILE"
+#         if [ -d "$OLD_DIR" ]; then
+#             cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+#             pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+#         else
+#             pm2 kill || true
+#         fi
+#         exit 1
+#     }
+
+#     local TAR_FILE="$APP_INSTALL_DIR/$(basename "$TMP_FILE" .gz)"
+#     if [ -f "$TAR_FILE" ]; then
+#         echo "📂 Extracting inner tar: $TAR_FILE to $APP_INSTALL_DIR"
+#         7z x "$TAR_FILE" -o"$APP_INSTALL_DIR" -y > "$HOME/.myapp/extract_tar.log" 2>&1 || {
+#             echo "❌ Failed to extract tar layer. Check $HOME/.myapp/extract_tar.log"
+#             cat "$HOME/.myapp/extract_tar.log"
+#             rm -f "$TAR_FILE"
+#             rm -f "$TMP_FILE"
+#             rm -rf "$APP_INSTALL_DIR"
+#             if [ -d "$OLD_DIR" ]; then
+#                 cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+#                 pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+#             else
+#                 pm2 kill || true
+#             fi
+#             exit 1
+#         }
+#         echo "✅ Inner tar extracted to $APP_INSTALL_DIR"
+#         rm -f "$TAR_FILE"
+#     else
+#         echo "❌ Inner tar file not found at $TAR_FILE. Listing contents of $APP_INSTALL_DIR:"
+#         ls -R "$APP_INSTALL_DIR"
+#         rm -f "$TMP_FILE"
+#         rm -rf "$APP_INSTALL_DIR"
+#         if [ -d "$OLD_DIR" ]; then
+#             cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+#             pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+#         else
+#             pm2 kill || true
+#         fi
+#         exit 1
+#     fi
+#     rm -f "$TMP_FILE"
+
+#     local DB_URL=$(yq eval '.dbUrl // ""' "$CONFIG_PATH" | sed 's/^"//;s/"$//')
+#     if [ -n "$DB_URL" ]; then
+#         write_env_mongo_url "$APP_INSTALL_DIR" "$DB_URL"
+#     fi
+
+#     write_config "installedVersion" "$VERSION_NAME"
+
+#     if [ ! -f "$APP_INSTALL_DIR/package.json" ]; then
+#         echo "❌ package.json not found in $APP_INSTALL_DIR. Aborting."
+#         echo "📋 Directory contents:"
+#         ls -R "$APP_INSTALL_DIR"
+#         rm -rf "$APP_INSTALL_DIR"
+#         if [ -d "$OLD_DIR" ]; then
+#             cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+#             pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+#         else
+#             pm2 kill || true
+#         fi
+#         exit 1
+#     fi
+
+#     # Validate Node.js environment
+#     echo "🔍 Validating Node.js environment..."
+#     if ! command -v node >/dev/null 2>&1; then
+#         echo "❌ Node.js not found. Attempting to install..."
+#         install_node "$APP_INSTALL_DIR"
+#     fi
+#     local NODE_PATH=$(which node 2>/dev/null)
+#     if [ -z "$NODE_PATH" ]; then
+#         echo "❌ Node.js executable not found. Aborting."
+#         rm -rf "$APP_INSTALL_DIR"
+#         if [ -d "$OLD_DIR" ]; then
+#             cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+#             pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+#         else
+#             pm2 kill || true
+#         fi
+#         exit 1
+#     fi
+#     echo "✅ Node.js found at: $NODE_PATH"
+
+#     # Install dependencies
+#     cd "$APP_INSTALL_DIR" || exit
+#     echo "📦 Running npm install --legacy-peer-deps..."
+#     set +e
+#     npm install --legacy-peer-deps > /dev/null 2>&1 || {
+#         echo "❌ npm install --legacy-peer-deps failed. Check PM2 logs for details."
+#         pm2 logs --lines 100 >> "$HOME/.myapp/pm2.log" 2>&1
+#         cat "$HOME/.myapp/pm2.log"
+#         pm2 kill || true
+#         sleep 2
+#         rm -rf "$APP_INSTALL_DIR" || {
+#             echo "⚠ Rollback failed: Device or resource busy. Attempting to force..."
+#             taskkill /IM node.exe /F 2>/dev/null || true
+#             sleep 2
+#             rm -rf "$APP_INSTALL_DIR" || echo "❌ Failed to remove $APP_INSTALL_DIR. Please manually delete it."
+#         }
+#         if [ -d "$OLD_DIR" ]; then
+#             cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+#             pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+#         else
+#             pm2 kill || true
+#         fi
+#         exit 1
+#     }
+#     echo "✅ npm install completed"
+
+#     # Validate package.json start script
+#     echo "🔍 Validating package.json start script..."
+#     local START_SCRIPT
+#     START_SCRIPT=$(yq eval '.scripts.start // ""' "$APP_INSTALL_DIR/package.json" 2>/dev/null | sed 's/^"//;s/"$//')
+#     if [ -z "$START_SCRIPT" ]; then
+#         echo "❌ No 'start' script found in $APP_INSTALL_DIR/package.json. Aborting."
+#         echo "📋 package.json contents:"
+#         cat "$APP_INSTALL_DIR/package.json"
+#         rm -rf "$APP_INSTALL_DIR"
+#         if [ -d "$OLD_DIR" ]; then
+#             cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+#             pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+#         else
+#             pm2 kill || true
+#         fi
+#         exit 1
+#     fi
+#     echo "✅ Found start script: $START_SCRIPT"
+
+#     # Verify .next directory exists for Next.js
+#     if [[ "$START_SCRIPT" == *"next start"* ]] && [ ! -d "$APP_INSTALL_DIR/.next" ]; then
+#         echo "❌ .next directory not found in $APP_INSTALL_DIR. Aborting."
+#         echo "📋 Directory contents:"
+#         ls -R "$APP_INSTALL_DIR"
+#         rm -rf "$APP_INSTALL_DIR"
+#         if [ -d "$OLD_DIR" ]; then
+#             cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+#             pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+#         else
+#             pm2 kill || true
+#         fi
+#         exit 1
+#     fi
+
+#     # Verify 'next' package is installed
+#     if [[ "$START_SCRIPT" == *"next start"* ]] && [ ! -d "$APP_INSTALL_DIR/node_modules/next" ]; then
+#         echo "❌ 'next' package not found in $APP_INSTALL_DIR/node_modules. Attempting to install..."
+#         npm install next --legacy-peer-deps > /dev/null 2>&1 || {
+#             echo "❌ Failed to install 'next' package. Check PM2 logs for details."
+#             pm2 logs --lines 100 >> "$HOME/.myapp/pm2.log" 2>&1
+#             cat "$HOME/.myapp/pm2.log"
+#             rm -rf "$APP_INSTALL_DIR"
+#             if [ -d "$OLD_DIR" ]; then
+#                 cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+#                 pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+#             else
+#                 pm2 kill || true
+#             fi
+#             exit 1
+#         }
+#         echo "✅ 'next' package installed"
+#     fi
+
+#     # # Test the start script
+#     # echo "🔍 Testing npm run start..."
+#     # set +e
+#     # npm run start --dry-run > /dev/null 2>&1
+#     # local NPM_EXIT_CODE=$?
+#     # set -e
+#     # if [ $NPM_EXIT_CODE -ne 0 ]; then
+#     #     echo "❌ npm run start failed. Check PM2 logs for details."
+#     #     pm2 logs --lines 100 >> "$HOME/.myapp/pm2.log" 2>&1
+#     #     cat "$HOME/.myapp/pm2.log"
+#     #     rm -rf "$APP_INSTALL_DIR"
+#     #     if [ -d "$OLD_DIR" ]; then
+#     #         cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+#     #         pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+#     #     else
+#     #         pm2 kill || true
+#     #     fi
+#     #     exit 1
+#     # fi
+#     # echo "✅ npm run start test passed"
+
+#     local DB_CHOICE=$(yq eval '.dbChoice // ""' "$CONFIG_PATH" | sed 's/^"//;s/"$//')
+#     if [ "$DB_CHOICE" = "local" ]; then
+#         install_and_start_mongodb
+#     elif [ "$DB_CHOICE" = "atlas" ]; then
+#         echo "✅ Using MongoDB Atlas."
+#     else
+#         echo "❌ Invalid dbChoice."
+#         exit 1
+#     fi
+
+# #     echo "🚀 Starting new version with PM2..."
+# #     if [ -n "$INSTALLED_VERSION" ] && [ "$INSTALLED_VERSION" != "none" ] && pm2 list | grep -q "hiretrack-$INSTALLED_VERSION"; then
+# #         pm2 stop "hiretrack-$INSTALLED_VERSION" || true
+# #         pm2 delete "hiretrack-$INSTALLED_VERSION" || true
+# #         echo "🛑 Stopped and deleted old process hiretrack-$INSTALLED_VERSION"
+# #     fi
+# #     pm2 start "npm run start" --name "hiretrack-$VERSION_NAME" --cwd "$APP_INSTALL_DIR" --log "$HOME/.myapp/pm2.log" || {
+# #         echo "❌ Failed to start new version. Check $HOME/.myapp/pm2.log for details."
+# #         pm2 logs --lines 100 >> "$HOME/.myapp/pm2.log" 2>&1
+# #         cat "$HOME/.myapp/pm2.log"
+# #         pm2 kill || true
+# #         sleep 2
+# #         rm -rf "$APP_INSTALL_DIR" || {
+# #             echo "⚠ Rollback failed: Device or resource busy. Attempting to force..."
+# #             taskkill /IM node.exe /F 2>/dev/null || true
+# #             sleep 2
+# #             rm -rf "$APP_INSTALL_DIR" || echo "❌ Failed to remove $APP_INSTALL_DIR. Please manually delete it."
+# #         }
+# #         if [ -d "$OLD_DIR" ]; then
+# #             cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+# #             pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR" || true
+# #         else
+# #             pm2 kill || true
+# #         fi
+# #         exit 1
+# #     }
+# #     pm2 save --force
+# #     echo "✅ PM2 process saved. Ensuring persistence across terminal sessions..."
+# #     pm2 startup | grep -v "sudo" | bash || true
+# #     echo "✅ PM2 cleanup completed. Installed/Updated to $VERSION_NAME at $APP_INSTALL_DIR"
+
+# #     if [ -d "$OLD_DIR" ]; then
+# #         echo "🧹 Cleaning up old backup at $OLD_DIR..."
+# #         rm -rf "$OLD_DIR"
+# #     fi
+# # }
+
+# echo "🚀 Starting new version with PM2..."
+# if [ -n "$INSTALLED_VERSION" ] && [ "$INSTALLED_VERSION" != "none" ] && pm2 list | grep -q "hiretrack-$INSTALLED_VERSION"; then
+#     pm2 stop "hiretrack-$INSTALLED_VERSION" || true
+#     pm2 delete "hiretrack-$INSTALLED_VERSION" || true
+#     echo "🛑 Stopped and deleted old process hiretrack-$INSTALLED_VERSION"
+# fi
+
+# # Use Windows-safe command execution
+# # pm2 start cmd --name "hiretrack-$VERSION_NAME" -- /c "npm run start" --cwd "$APP_INSTALL_DIR" || {
+# # Convert Git Bash path (/c/Users/Upforce/.myapp/APP) to Windows-style path for PM2
+# APP_PATH_WIN=$(cygpath -w "$APP_INSTALL_DIR" | sed 's#\\#/#g')
+
+# # APP_INSTALL_DIR_WIN=$(cygpath -w "$APP_INSTALL_DIR")
+
+# # Always start from APP directory
+# cd "$APP_INSTALL_DIR" || { echo "❌ Cannot cd into $APP_INSTALL_DIR"; exit 1; }
+
+# # Run the app through PM2 properly
+# pm2 start "npm run start" \
+#     --name "hiretrack-$VERSION_NAME" \
+#     --cwd "$APP_PATH_WIN" \
+#     --interpreter bash \
+#     --time || {
+#         echo "❌ Failed to start app with PM2. Check logs at ~/.pm2/logs/"
+#         pm2 logs --lines 50
+#         exit 1
+#     }
+# # pm2 start cmd --name "hiretrack-$VERSION_NAME" -- /c "cd $APP_INSTALL_DIR_WIN && npm run start" || {
+
+# #     echo "❌ Failed to start new version. Check $HOME/.myapp/pm2.log for details."
+# #     pm2 logs --lines 100 >> "$HOME/.myapp/pm2.log" 2>&1
+# #     cat "$HOME/.myapp/pm2.log"
+# #     pm2 kill || true
+# #     sleep 2
+# #     rm -rf "$APP_INSTALL_DIR" || {
+# #         echo "⚠ Rollback failed: Device or resource busy. Attempting to force..."
+# #         taskkill /IM node.exe /F 2>/dev/null || true
+# #         sleep 2
+# #         rm -rf "$APP_INSTALL_DIR" || echo "❌ Failed to remove $APP_INSTALL_DIR. Please manually delete it."
+# #     }
+# #     if [ -d "$OLD_DIR" ]; then
+# #         cp -r "$OLD_DIR" "$APP_INSTALL_DIR"
+# #         # pm2 start cmd --name "hiretrack-$INSTALLED_VERSION" -- /c "npm run start" --cwd "$APP_INSTALL_DIR" || true
+# #         pm2 start cmd --name "hiretrack-$VERSION_NAME" -- /c "cd $APP_INSTALL_DIR_WIN && npm run start" || true
+# #     else
+# #         pm2 kill || true
+# #     fi
+# #     exit 1
+# # }
+
+# pm2 save --force
+# echo "✅ PM2 process saved. Ensuring persistence across terminal sessions..."
+# setup_pm2_startup
+# echo "✅ PM2 cleanup completed. Installed/Updated to $VERSION_NAME at $APP_INSTALL_DIR"
+
+# if [ -d "$OLD_DIR" ]; then
+#     echo "🧹 Cleaning up old backup at $OLD_DIR..."
+#     rm -rf "$OLD_DIR"
+# fi
+
+# }
+
+############################################
+# Function: Backup current installation
+############################################
+# backup_current_version() {
+#     local INSTALLED_VERSION="$1"
+#     if [ "$INSTALLED_VERSION" != "none" ] && [ -d "$APP_INSTALL_DIR" ] && [ "$(ls -A "$APP_INSTALL_DIR")" ]; then
+#         echo "📦 Backing up current version $INSTALLED_VERSION..."
+#         rm -rf "$BACKUP_DIR/hiretrack-$INSTALLED_VERSION"
+#         cp -r "$APP_INSTALL_DIR" "$BACKUP_DIR/hiretrack-$INSTALLED_VERSION"
+#         echo "✅ Backup created at $BACKUP_DIR/hiretrack-$INSTALLED_VERSION"
+#     else
+#         echo "⚠️ No existing installation to backup."
+#     fi
+# }
+
+
+backup_current_version() {
+    local INSTALLED_VERSION="$1"
+
+    if [ "$INSTALLED_VERSION" != "none" ] && [ -d "$APP_INSTALL_DIR" ] && [ "$(ls -A "$APP_INSTALL_DIR")" ]; then
+        echo "📦 Backing up current version $INSTALLED_VERSION..."
+
+        # Ensure backup directory exists
+        mkdir -p "$BACKUP_DIR"
+
+        # Go to app install directory
+        pushd "$APP_INSTALL_DIR" >/dev/null || {
+            echo "❌ Failed to enter $APP_INSTALL_DIR"
+            return 1
+        }
+
+        # Remove node_modules if exists
+        if [ -d "node_modules" ]; then
+            echo "🧹 Removing node_modules..."
+            rm -rf node_modules
+        fi
+
+        # Create tar backup using 7-Zip (Windows Git Bash safe)
+        local BACKUP_FILE="$BACKUP_DIR/backup-$INSTALLED_VERSION.tar"
+        echo "🗜️ Creating tar archive at $BACKUP_FILE ..."
+        
+        # Convert paths for Windows (7z expects Windows-style)
+        if command -v cygpath >/dev/null 2>&1; then
+            BACKUP_FILE_WIN=$(cygpath -w "$BACKUP_FILE")
+            APP_DIR_WIN=$(cygpath -w "$APP_INSTALL_DIR")
+        else
+            BACKUP_FILE_WIN="$BACKUP_FILE"
+            APP_DIR_WIN="$APP_INSTALL_DIR"
+        fi
+
+        # Remove existing backup if any
+        if [ -f "$BACKUP_FILE" ]; then
+            echo "♻️ Removing old backup file..."
+            rm -f "$BACKUP_FILE"
+        fi
+
+        # Run 7-Zip to create tar archive
+        7z a -ttar "$BACKUP_FILE_WIN" "$APP_DIR_WIN" >/dev/null 2>&1
+
+        if [ $? -eq 0 ]; then
+            echo "✅ Backup created successfully: $BACKUP_FILE"
+        else
+            echo "❌ Backup failed using 7z."
+        fi
+
+        popd >/dev/null || true
+    else
+        echo "⚠️ No existing installation to backup."
+    fi
+}
+
+############################################
+# Function: Rollback to previous version
+############################################
+# rollback_previous_version() {
+#     local OLD_VERSION="$1"
+#     echo "🛠 Rolling back to previous version..."
+#     rm -rf "$APP_INSTALL_DIR"
+#     if [ -d "$BACKUP_DIR/hiretrack-$OLD_VERSION" ]; then
+#         cp -r "$BACKUP_DIR/hiretrack-$OLD_VERSION" "$APP_INSTALL_DIR"
+#         echo "✅ Rolled back to $OLD_VERSION"
+#         start_pm2 "$OLD_VERSION" "$OLD_VERSION"
+#     else
+#         echo "❌ No backup found. PM2 will be killed."
+#         pm2 kill || true
+#     fi
+#     exit 1
+# }
+rollback_previous_version() {
+    local OLD_VERSION="$1"
+
+    # --- If no old version is given, use INSTALLED_VERSION from config ---
+    if [ -z "$OLD_VERSION" ] || [ "$OLD_VERSION" = "none" ]; then
+        INSTALLED_VERSION=$(yq eval '.installedVersion // "none"' "$CONFIG_PATH" | sed 's/^"//;s/"$//;s/\\//g' | xargs)
+        [ -z "$INSTALLED_VERSION" ] && INSTALLED_VERSION="none"
+        OLD_VERSION="$INSTALLED_VERSION"
+    fi
+
+    echo "🛠 Rolling back to previous version: $OLD_VERSION ..."
+
+    # Remove current app dir
+    rm -rf "$APP_INSTALL_DIR"
+
+    # Restore backup if exists
+    if [ -d "$BACKUP_DIR/hiretrack-$OLD_VERSION" ]; then
+        cp -r "$BACKUP_DIR/hiretrack-$OLD_VERSION" "$APP_INSTALL_DIR"
+        echo "✅ Rolled back to $OLD_VERSION"
+        start_pm2 "$OLD_VERSION" "$OLD_VERSION"
+    else
+        echo "❌ No backup found for $OLD_VERSION. PM2 will be killed."
+        pm2 kill || true
+    fi
+
+    exit 1
+}
+############################################
+# Function: Start app with PM2 (Windows/Git Bash compatible)
+############################################
+start_pm2() {
+    local VERSION_NAME="$1"
+    local OLD_VERSION="${2:-$INSTALLED_VERSION}"
+
+    echo "🚀 Starting PM2 for version: $VERSION_NAME"
+
+    # --- Convert Linux-style path to Windows format (for PM2) ---
+    local APP_PATH_WIN
+    if command -v cygpath >/dev/null 2>&1; then
+        APP_PATH_WIN=$(cygpath -w "$APP_INSTALL_DIR")
+    else
+        APP_PATH_WIN="$APP_INSTALL_DIR"
+    fi
+
+    echo "📂 App path: $APP_PATH_WIN"
+
+    # --- Check if ecosystem.config.cjs exists ---
+    if [ ! -f "$APP_INSTALL_DIR/ecosystem.config.cjs" ]; then
+        echo "❌ ecosystem.config.cjs not found in $APP_INSTALL_DIR"
+        echo "🛑 Cannot start PM2. Exiting..."
+        return 1
+    fi
+
+    # --- Stop and remove old PM2 process if exists ---
+    if pm2 list | grep -q "hiretrack-$OLD_VERSION"; then
+        echo "🛑 Stopping and deleting old process: hiretrack-$OLD_VERSION"
+        pm2 stop "hiretrack-$OLD_VERSION" || true
+        pm2 delete "hiretrack-$OLD_VERSION" || true
+    fi
+
+    # --- Change to app directory ---
+    cd "$APP_PATH_WIN" || { echo "❌ Failed to cd into $APP_PATH_WIN"; return 1; }
+
+    # --- Start new PM2 process ---
+    echo "🚀 Starting new PM2 process: hiretrack-$VERSION_NAME"
+    pm2 start ecosystem.config.cjs || {
+        echo "❌ Failed to start app with PM2."
+        echo "📜 Showing last 50 PM2 log lines..."
+        pm2 logs --lines 50
+        rollback_previous_version "$OLD_VERSION"
+        return 1
+    }
+
+    # --- Save PM2 process list ---
+    pm2 save --force
+
+    echo "✅ PM2 successfully started and saved for version: $VERSION_NAME"
+}
+
+
+############################################
+# Function: Extract asset (gzip + inner tar)
+############################################
+# extract_asset() {
+#     local TMP_FILE="$1"
+
+#     rm -rf "$APP_INSTALL_DIR"
+#     mkdir -p "$APP_INSTALL_DIR"
+
+#     # Extract gzip layer
+#     7z x "$TMP_FILE" -o"$APP_INSTALL_DIR" -y > "$HOME/.myapp/extract_gzip.log" 2>&1 || {
+#         echo "❌ Failed to extract gzip layer."
+#         rollback_previous_version
+#     }
+
+#     # Extract inner tar
+#     local TAR_FILE="$APP_INSTALL_DIR/$(basename "$TMP_FILE" .gz)"
+#     if [ -f "$TAR_FILE" ]; then
+#         7z x "$TAR_FILE" -o"$APP_INSTALL_DIR" -y > "$HOME/.myapp/extract_tar.log" 2>&1 || {
+#             echo "❌ Failed to extract inner tar."
+#             rollback_previous_version
+#         }
+#         rm -f "$TAR_FILE"
+#     else
+#         echo "❌ Inner tar not found at $TAR_FILE"
+#         rollback_previous_version
+#     fi
+# }
+
+extract_asset() {
+    local TMP_FILE="$1"
+
+    # Robust removal for Windows: Use PowerShell to force-delete
+    pwsh "Remove-Item -Path '$(cygpath -w "$APP_INSTALL_DIR")' -Recurse -Force -ErrorAction SilentlyContinue"
+    if [ -d "$APP_INSTALL_DIR" ]; then
+        echo "⚠ Retrying removal after brief delay..."
+        sleep 2
+        pwsh "Remove-Item -Path '$(cygpath -w "$APP_INSTALL_DIR")' -Recurse -Force -ErrorAction SilentlyContinue"
+        if [ -d "$APP_INSTALL_DIR" ]; then
+            echo "❌ Failed to remove $APP_INSTALL_DIR even after retry. Please manually delete it and rerun."
+            exit 1
+        fi
+    fi
+
+    mkdir -p "$APP_INSTALL_DIR"
+
+    7z x "$TMP_FILE" -o"$APP_INSTALL_DIR" -y > "$HOME/.myapp/extract_gzip.log" 2>&1 || {
+        echo "❌ Failed to extract gzip layer."
+        rollback_previous_version
+    }
+
+    local TAR_FILE="$APP_INSTALL_DIR/$(basename "$TMP_FILE" .gz)"
+    if [ -f "$TAR_FILE" ]; then
+        7z x "$TAR_FILE" -o"$APP_INSTALL_DIR" -y > "$HOME/.myapp/extract_tar.log" 2>&1 || {
+            echo "❌ Failed to extract inner tar."
+            rollback_previous_version
+        }
+        rm -f "$TAR_FILE"
+    else
+        echo "❌ Inner tar not found at $TAR_FILE"
+        rollback_previous_version
+    fi
+}
+############################################
+# Function: Ensure Node.js is installed
+############################################
+ensure_node() {
+    if ! command -v node >/dev/null 2>&1; then
+        echo "❌ Node.js not found. Please install Node.js."
+        rollback_previous_version
+    fi
+}
+
+############################################
+# Function: Install npm dependencies
+############################################
+install_dependencies() {
+    cd "$APP_INSTALL_DIR" || rollback_previous_version
+    echo "📦 Running npm install --legacy-peer-deps..."
+    npm install --legacy-peer-deps > /dev/null 2>&1 || rollback_previous_version
+    echo "✅ npm install completed"
+}
+
+############################################
+# Function: Validate package.json & Next.js
+############################################
+validate_package_json() {
+    if [ ! -f "$APP_INSTALL_DIR/package.json" ]; then
+        echo "❌ package.json not found"
+        rollback_previous_version
+    fi
+
+    local START_SCRIPT
+    START_SCRIPT=$(yq eval '.scripts.start // ""' "$APP_INSTALL_DIR/package.json" 2>/dev/null | sed 's/^"//;s/"$//')
+    if [ -z "$START_SCRIPT" ]; then
+        echo "❌ No start script in package.json"
+        rollback_previous_version
+    fi
+
+    if [[ "$START_SCRIPT" == *"next start"* ]]; then
+        if [ ! -d "$APP_INSTALL_DIR/.next" ]; then
+            echo "❌ .next directory missing. Did you build the app?"
+            rollback_previous_version
+        fi
+        if [ ! -d "$APP_INSTALL_DIR/node_modules/next" ]; then
+            echo "🔧 Installing missing 'next' package..."
+            npm install next --legacy-peer-deps > /dev/null 2>&1 || rollback_previous_version
+        fi
+    fi
+}
+
+
+############################################
+# Function: Main update/install workflow
+############################################
+check_update_and_install() {
+    # Default config if missing
+    if [ ! -f "$CONFIG_PATH" ]; then
+        echo '{"autoUpdate": true, "installedVersion": "none"}' > "$CONFIG_PATH"
+    fi
+
+    local AUTO_UPDATE
+    AUTO_UPDATE=$(yq eval '.autoUpdate // true' "$CONFIG_PATH")
+    local INSTALLED_VERSION
+    INSTALLED_VERSION=$(yq eval '.installedVersion // "none"' "$CONFIG_PATH" | sed 's/^"//;s/"$//;s/\\//g' | xargs)
+    [ -z "$INSTALLED_VERSION" ] && INSTALLED_VERSION="none"
+
+    if [ "$AUTO_UPDATE" != "true" ]; then
+        echo "✅ Auto-update disabled. Keeping version: $INSTALLED_VERSION"
+        return
+    fi
+
+    local LATEST_VERSION
+    LATEST_VERSION=$(check_latest_version | sed 's/^"//;s/"$//;s/\\//g' | xargs)
+
+    if [ "$INSTALLED_VERSION" = "$LATEST_VERSION" ]; then
+        echo "✅ Already up to date! Version: $INSTALLED_VERSION"
+        return
+    fi
+
+    echo "📦 Updating from $INSTALLED_VERSION → $LATEST_VERSION"
+
+    # Backup current version
+    backup_current_version "$INSTALLED_VERSION"
+
+    # Download asset
+    local ASSET_URL
+    ASSET_URL=$(validate_license_and_get_asset "$LATEST_VERSION")
+    TMP_FILE="$HOME/.myapp/tmp_asset.tar.gz"
+    curl -L "$ASSET_URL" -o "$TMP_FILE" || rollback_previous_version "$INSTALLED_VERSION"
+
+    # Extract, install, validate
+    extract_asset "$TMP_FILE"
+    ensure_node
+    install_dependencies
+    validate_package_json
+
+    # Write MongoDB URL if configured
+    local DB_URL
+    DB_URL=$(yq eval '.dbUrl // ""' "$CONFIG_PATH" | sed 's/^"//;s/"$//')
+    if [ -n "$DB_URL" ]; then
+        write_env_mongo_url "$APP_INSTALL_DIR" "$DB_URL"
+    fi
+
+    # Update installed version in config
+    write_config "installedVersion" "$LATEST_VERSION"
+
+    # Start PM2
+    start_pm2 "$LATEST_VERSION" "$INSTALLED_VERSION"
+
+    # Cleanup old backup
+    if [ -d "$BACKUP_DIR/hiretrack-$INSTALLED_VERSION" ]; then
+        rm -rf "$BACKUP_DIR/hiretrack-$INSTALLED_VERSION"
+    fi
+
+    # echo "✅ Update/install completed. Running version: $LATEST_VERSION"
+}
+
+
+
+
+
+install_specific_version() {
+    local VERSION="$1"
+    [ -z "$VERSION" ] && VERSION=$(prompt_for_version)
+    local VERSION_NAME=${VERSION#hiretrack-}
+    echo "📦 Installing version: $VERSION_NAME"
+
+    local BACKUP_FILE="$BACKUP_DIR/hiretrack-app-backup.tar.gz"
+    if [ -d "$APP_INSTALL_DIR" ] && [ "$(ls -A "$APP_INSTALL_DIR")" ]; then
+        7z a "$BACKUP_FILE" "$APP_INSTALL_DIR/*" -y
+        echo "📦 Backup saved: $BACKUP_FILE"
+    else
+        echo "⚠️ No existing APP to backup."
+    fi
+
+    local RELEASE_FILE="$RELEASES_DIR/hiretrack-$VERSION_NAME.tar.gz"
+    if [ ! -f "$RELEASE_FILE" ]; then
+        echo "📥 Downloading release $VERSION_NAME..."
+        local ASSET_URL=$(validate_license_and_get_asset "$VERSION_NAME")
+        curl -L "$ASSET_URL" -o "$RELEASE_FILE" || { echo "❌ Failed to download."; return 1; }
+        echo "✅ Release tarball saved: $RELEASE_FILE"
+    else
+        echo "✅ Using cached release: $RELEASE_FILE"
+    fi
+
+    rm -rf "$TMP_INSTALL_DIR"/*
+    7z x "$RELEASE_FILE" -o"$TMP_INSTALL_DIR" -y || {
+        echo "❌ Failed to extract. Rolling back..."
+        rm -rf "$APP_INSTALL_DIR"/*
+        7z x "$BACKUP_FILE" -o"$APP_INSTALL_DIR" -y
+        return 1
+    }
+
+    local MONGO_URL=$(yq eval '.dbUrl // ""' "$CONFIG_PATH")
+    export MONGODB_URI="$MONGO_URL"
+    echo "✅ Using MongoDB: $MONGO_URL"
+
+    local INSTALLED_VERSION=$(yq eval '.installedVersion // ""' "$CONFIG_PATH")
+    if [ -n "$INSTALLED_VERSION" ] && pm2 list | grep -q "hiretrack-$INSTALLED_VERSION"; then
+        echo "⏹ Stopping old version hiretrack-$INSTALLED_VERSION..."
+        pm2 stop "hiretrack-$INSTALLED_VERSION" || true
+        pm2 delete "hiretrack-$INSTALLED_VERSION" || true
+    fi
+
+    rm -rf "$APP_INSTALL_DIR"/*
+    cp -r "$TMP_INSTALL_DIR"/* "$APP_INSTALL_DIR/" || {
+        echo "❌ Failed to copy. Rolling back..."
+        rm -rf "$APP_INSTALL_DIR"/*
+        7z x "$BACKUP_FILE" -o"$APP_INSTALL_DIR" -y
+        return 1
+    }
+
+    cd "$APP_INSTALL_DIR" || exit
+    npm install --legacy-peer-deps || {
+        echo "❌ npm install failed. Rolling back..."
+        rm -rf "$APP_INSTALL_DIR"/*
+        7z x "$BACKUP_FILE" -o"$APP_INSTALL_DIR" -y
+        return 1
+    }
+
+    echo "🚀 Starting hiretrack-$VERSION_NAME with PM2..."
+    pm2 start "npm run start" --name "hiretrack-$VERSION_NAME" --cwd "$APP_INSTALL_DIR" || {
+        echo "❌ Failed to start. Rolling back..."
+        rm -rf "$APP_INSTALL_DIR"/*
+        7z x "$BACKUP_FILE" -o"$APP_INSTALL_DIR" -y
+        pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR"
+        return 1
+    }
+    pm2 save --force
+
+    write_config "installedVersion" "$VERSION_NAME"
+    echo "✅ Installed version $VERSION_NAME and started as PM2 service hiretrack-$VERSION_NAME"
+}
+
+setup_nginx() {
+    local NGINX_SCRIPT="$HOME/.myapp/nginx_setup.sh"
+    echo "🚀 Generating and running Nginx setup script..."
+
+    cat <<-EOF > "$NGINX_SCRIPT"
+	#!/bin/bash
+	set -euo pipefail
+
+	# PowerShell wrapper for Windows tasks
+	pwsh() { powershell.exe -NoProfile -Command "\$*"; }
+
+	# Configuration Paths
+	CONFIG_PATH="$HOME/.myapp/config.json"
+	APP_PORT="\${APP_PORT:-3000}"
+	NGINX_BACKUP_DIR="$HOME/.myapp/nginx-backups"
+	NGINX_HOME="/c/tools/nginx"
+	NGINX_CONF_DIR="\${NGINX_HOME}/conf"
+	NGINX_CONF_FILE="\${NGINX_CONF_DIR}/nginx.conf"
+	LOG_DIR="\${NGINX_HOME}/logs"
+
+	# Global variables
+	DOMAIN_NAME=""
+	EMAIL=""
+
+	# Detect OS
+	OS_TYPE=\$(uname -s | tr '[:upper:]' '[:lower:]')
+	if [[ "\$OS_TYPE" == *mingw* ]]; then
+	    OS_TYPE="windows"
+	fi
+	echo "🖥️  Detected OS: \$OS_TYPE"
+
+	mkdir -p "\$NGINX_BACKUP_DIR"
+	mkdir -p "\$LOG_DIR"
+
+	# Dependency check function
+	check_dep() {
+	    local CMD=\$1
+	    local CHOCO_PKG="\$CMD"
+	    [ "\$CMD" = "7z" ] && CHOCO_PKG="7zip"
+	    [ "\$CMD" = "yq" ] && CHOCO_PKG="yq"
+	    if ! command -v "\$CMD" >/dev/null 2>&1; then
+		echo "⚠️  \$CMD not found. Installing via Chocolatey..."
+		choco install -y "\$CHOCO_PKG" --source=https://community.chocolatey.org/api/v2/
+	    fi
+	    echo "✅ \$CMD is available."
+	}
+
+	check_dep curl
+	check_dep 7z
+	check_dep yq
+
+	# Prompt for domain name
+	prompt_for_domain() {
+	    echo ""
+	    echo "════════════════════════════════════════════════"
+	    echo "  Domain Configuration"
+	    echo "════════════════════════════════════════════════"
+	    echo ""
+	    echo "Please enter the domain name for your HireTrack instance."
+	    echo "Examples:"
+	    echo "  - release.hiretrack.in"
+	    echo "  - demo.yourcompany.com"
+	    echo "  - localhost (for local testing only)"
+	    echo ""
+
+	    while true; do
+		read -p "🌐 Enter domain name: " DOMAIN_NAME
+		DOMAIN_NAME=\$(echo "\$DOMAIN_NAME" | xargs)
+		if [ -z "\$DOMAIN_NAME" ]; then
+		    echo "❌ Domain name cannot be empty. Please try again."
+		    echo ""
+		    continue
+		fi
+		if [[ "\$DOMAIN_NAME" == "localhost" ]]; then
+		    echo "⚠️  Using localhost (HTTP only, no SSL)"
+		    break
+		elif echo "\$DOMAIN_NAME" | grep -qE '^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\$'; then
+		    echo "✅ Domain accepted: \$DOMAIN_NAME"
+		    break
+		else
+		    echo "❌ Invalid domain format. Please use a valid domain like 'release.hiretrack.in'"
+		    echo ""
+		fi
+	    done
+
+	    echo ""
+	    echo "📋 Domain Summary:"
+	    echo "   Domain: \$DOMAIN_NAME"
+	    echo ""
+	    read -p "Is this correct? (Y/n): " CONFIRM
+	    if [[ "\$CONFIRM" =~ ^[Nn]\$ ]]; then
+		echo "❌ Aborted. Please run the script again."
+		exit 1
+	    fi
+	    echo ""
+	    echo "✅ Domain confirmed: \$DOMAIN_NAME"
+	}
+
+	# Prompt for email
+	prompt_for_email() {
+	    if [ -f "\$CONFIG_PATH" ]; then
+		EMAIL=\$(yq eval '.email // ""' "\$CONFIG_PATH")
+	    fi
+	    if [ -n "\$EMAIL" ] && [ "\$EMAIL" != "null" ]; then
+		echo "✅ Using email from config: \$EMAIL"
+		return
+	    fi
+	    echo ""
+	    echo "📧 Email is required for SSL certificate registration"
+	    echo ""
+	    while true; do
+		read -p "Enter your email address: " EMAIL
+		EMAIL=\$(echo "\$EMAIL" | xargs)
+		if [ -z "\$EMAIL" ]; then
+		    echo "❌ Email cannot be empty."
+		    continue
+		elif echo "\$EMAIL" | grep -qE '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\$'; then
+		    echo "✅ Email accepted: \$EMAIL"
+		    break
+		else
+		    echo "❌ Invalid email format. Please try again."
+		fi
+	    done
+	}
+
+	# Save domain to config
+	save_domain_to_config() {
+	    if [ -f "\$CONFIG_PATH" ]; then
+		local TEMP_FILE=\$(mktemp)
+		if yq eval ". + {\"serverName\": \"\$DOMAIN_NAME\", \"email\": \"\$EMAIL\"}" "\$CONFIG_PATH" > "\$TEMP_FILE" && [ -s "\$TEMP_FILE" ] && yq -o=json '.' "\$TEMP_FILE" > /dev/null 2>&1; then
+		    mv "\$TEMP_FILE" "\$CONFIG_PATH"
+		    chmod u+rw "\$CONFIG_PATH"
+		    echo "✅ Domain and email saved to config: \$CONFIG_PATH"
+		else
+		    echo "❌ Failed to save domain and email to \$CONFIG_PATH."
+		    rm -f "\$TEMP_FILE"
+		    exit 1
+		fi
+	    else
+		mkdir -p "\$(dirname "\$CONFIG_PATH")"
+		if [ ! -w "\$(dirname "\$CONFIG_PATH")" ]; then
+		    echo "❌ Cannot write to \$(dirname "\$CONFIG_PATH"). Check permissions."
+		    exit 1
+		fi
+		echo "{\"serverName\": \"\$DOMAIN_NAME\", \"email\": \"\$EMAIL\", \"autoUpdate\": true, \"installedVersion\": \"none\"}" > "\$CONFIG_PATH"
+		chmod u+rw "\$CONFIG_PATH"
+		if ! yq -o=json '.' "\$CONFIG_PATH" > /dev/null 2>&1; then
+		    echo "❌ Created config.json contains invalid JSON at \$CONFIG_PATH"
+		    exit 1
+		fi
+		echo "✅ Config created with domain and email: \$CONFIG_PATH"
+	    fi
+	}
+
+	# Check DNS resolution
+	check_dns_resolution() {
+	    if [ "\$DOMAIN_NAME" == "localhost" ]; then
+		return 0
+	    fi
+	    echo ""
+	    echo "🔍 Checking DNS resolution for \$DOMAIN_NAME..."
+	    local DNS_IP
+	    DNS_IP=\$(nslookup "\$DOMAIN_NAME" 2>/dev/null | grep "Address:" | tail -n1 | awk '{print \$NF}')
+	    if [ -n "\$DNS_IP" ]; then
+		echo "✅ Domain resolves to: \$DNS_IP"
+		local SERVER_IP
+		SERVER_IP=\$(curl -s ifconfig.me 2>/dev/null || curl -s icanhazip.com 2>/dev/null || echo "unknown")
+		if [ "\$SERVER_IP" != "unknown" ]; then
+		    echo "   Server's public IP: \$SERVER_IP"
+		    if [ "\$DNS_IP" == "\$SERVER_IP" ]; then
+			echo "   ✅ DNS points to this server!"
+		    else
+			echo "   ⚠️  WARNING: DNS (\$DNS_IP) does not point to this server (\$SERVER_IP)"
+			echo "   SSL certificate generation may fail."
+			echo ""
+			read -p "Continue anyway? (y/N): " CONTINUE
+			if [[ ! "\$CONTINUE" =~ ^[Yy]\$ ]]; then
+			    echo "❌ Aborted. Please update your DNS records first."
+			    exit 1
+			fi
+		    fi
+		fi
+	    else
+		echo "⚠️  WARNING: Cannot resolve \$DOMAIN_NAME"
+		echo "   Please ensure DNS is configured correctly."
+		echo ""
+		read -p "Continue anyway? (y/N): " CONTINUE
+		if [[ ! "\$CONTINUE" =~ ^[Yy]\$ ]]; then
+		    echo "❌ Aborted. Please configure DNS first."
+		    exit 1
+		fi
+	    fi
+	}
+
+	# Check if application is running
+	check_application() {
+	    echo ""
+	    echo "🔍 Checking if application is running on port \$APP_PORT..."
+	    if ! netstat -ano | grep -q ":\$APP_PORT.*LISTENING"; then
+		echo "⚠️  WARNING: No service detected on port \$APP_PORT"
+		echo "Please ensure your HireTrack application is running before continuing."
+		read -p "Continue anyway? (y/N): " CONTINUE
+		if [[ ! "\$CONTINUE" =~ ^[Yy]\$ ]]; then
+		    echo "❌ Aborted. Please start your application first with:"
+		    echo "   pm2 list  # Check running apps"
+		    exit 1
+		fi
+	    else
+		echo "✅ Application is running on port \$APP_PORT"
+	    fi
+	}
+
+	# Install Nginx
+	install_nginx() {
+	    if command -v nginx >/dev/null 2>&1; then
+		echo "✅ Nginx already installed"
+		return
+	    fi
+	    echo ""
+	    echo "📦 Installing Nginx via Chocolatey..."
+	    if [[ "\$OS_TYPE" == "windows" ]]; then
+		choco install -y nginx
+	    else
+		echo "❌ Unsupported OS: \$OS_TYPE"
+		exit 1
+	    fi
+	    if ! command -v nginx >/dev/null 2>&1; then
+		echo "❌ Nginx installation failed."
+		exit 1
+	    fi
+	    echo "✅ Nginx installed successfully."
+	}
+
+	# Start Nginx
+	start_nginx() {
+	    echo ""
+	    echo "▶️  Starting Nginx..."
+	    if [[ "\$OS_TYPE" == "windows" ]]; then
+		nginx
+	    fi
+	    sleep 2
+	    if ps -ef | grep -q "nginx"; then
+		echo "✅ Nginx is running"
+	    else
+		echo "❌ Nginx failed to start. Checking for errors..."
+		nginx -t
+		exit 1
+	    fi
+	}
+
+	# Setup SSL Certificate
+	setup_ssl_certificate() {
+	    local USE_HTTPS="false"
+	    local CERT_PATH="/c/ProgramData/letsencrypt-winauto/live/\$DOMAIN_NAME/fullchain.pem"
+	    local KEY_PATH="/c/ProgramData/letsencrypt-winauto/live/\$DOMAIN_NAME/privkey.pem"
+
+	    echo ""
+	    echo "🔐 Setting up SSL Certificate for \$DOMAIN_NAME..."
+	    if [ "\$DOMAIN_NAME" == "localhost" ]; then
+		echo "⚠️  Localhost detected. Skipping SSL setup (will use HTTP only)."
+		echo "false"
+		return
+	    fi
+	    echo "📦 Installing win-acme for Let's Encrypt on Windows..."
+	    if ! command -v wacs >/dev/null 2>&1; then
+		choco install -y win-acme
+	    fi
+	    if ! command -v wacs >/dev/null 2>&1; then
+		echo "❌ win-acme installation failed. Using HTTP only."
+		USE_HTTPS="false"
+		echo "\$USE_HTTPS"
+		return
+	    fi
+	    echo "✅ win-acme is ready"
+	    echo ""
+	    echo "🔐 Obtaining/renewing Let's Encrypt certificate for \$DOMAIN_NAME..."
+	    wacs --target manual --host "\$DOMAIN_NAME" --email "\$EMAIL" --accepttos --validation filesystem --store pemfiles --pemfilesdir "/c/ProgramData/letsencrypt-winauto" --installation none
+	    if [ -f "\$CERT_PATH" ]; then
+		USE_HTTPS="true"
+		echo ""
+		echo "✅ Successfully obtained/renewed Let's Encrypt certificate for \$DOMAIN_NAME!"
+		echo "   Certificate: \$CERT_PATH"
+		echo "   Private Key: \$KEY_PATH"
+	    else
+		echo ""
+		echo "❌ Failed to obtain/renew certificate."
+		echo "Proceeding with HTTP only."
+		USE_HTTPS="false"
+	    fi
+	    echo "\$USE_HTTPS"
+	}
+
+	# Configure Nginx
+	configure_nginx() {
+	    local USE_HTTPS="\$1"
+	    local CERT_PATH="/c/ProgramData/letsencrypt-winauto/live/\$DOMAIN_NAME/fullchain.pem"
+	    local KEY_PATH="/c/ProgramData/letsencrypt-winauto/live/\$DOMAIN_NAME/privkey.pem"
+
+	    echo ""
+	    echo "📝 Configuring Nginx for \$DOMAIN_NAME..."
+	    if [ -f "\$NGINX_CONF_FILE" ]; then
+		local BACKUP_FILE="\$NGINX_BACKUP_DIR/nginx.conf.backup.\$(date +%s)"
+		cp "\$NGINX_CONF_FILE" "\$BACKUP_FILE"
+		echo "📦 Backed up existing config to: \$BACKUP_FILE"
+	    fi
+	    local NGINX_CONF_CONTENT=\$(cat <<INNEREOF
+worker_processes auto;
+events {
+    worker_connections 1024;
+}
+http {
+    include mime.types;
+    default_type application/octet-stream;
+    sendfile on;
+    keepalive_timeout 65;
+    server {
+        listen 80;
+        server_name \$DOMAIN_NAME;
+        \$( [ "\$USE_HTTPS" = "true" ] && echo "return 301 https://\\\$server_name\\\$request_uri;" || echo "" )
+        client_max_body_size 500M;
+        location / {
+            proxy_pass http://localhost:\$APP_PORT;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade \\\$http_upgrade;
+            proxy_set_header Connection 'upgrade';
+            proxy_set_header Host \\\$host;
+            proxy_set_header X-Real-IP \\\$remote_addr;
+            proxy_set_header X-Forwarded-For \\\$proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto \\\$scheme;
+            proxy_cache_bypass \\\$http_upgrade;
+            proxy_buffering off;
+            proxy_connect_timeout 300s;
+            proxy_send_timeout 300s;
+            proxy_read_timeout 300s;
+        }
+        error_log \$LOG_DIR/\${DOMAIN_NAME}.error.log;
+        access_log \$LOG_DIR/\${DOMAIN_NAME}.access.log;
+    }
+\$( if [ "\$DOMAIN_NAME" != "localhost" ]; then cat <<INNERINNEREOF
+    server {
+        listen 443 ssl;
+        server_name \$DOMAIN_NAME;
+        ssl_certificate \$CERT_PATH;
+        ssl_certificate_key \$KEY_PATH;
+        client_max_body_size 500M;
+        location / {
+            proxy_pass http://localhost:\$APP_PORT;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade \\\$http_upgrade;
+            proxy_set_header Connection 'upgrade';
+            proxy_set_header Host \\\$host;
+            proxy_set_header X-Real-IP \\\$remote_addr;
+            proxy_set_header X-Forwarded-For \\\$proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto \\\$scheme;
+            proxy_cache_bypass \\\$http_upgrade;
+            proxy_buffering off;
+            proxy_connect_timeout 300s;
+            proxy_send_timeout 300s;
+            proxy_read_timeout 300s;
+        }
+        error_log \$LOG_DIR/\${DOMAIN_NAME}.error.log;
+        access_log \$LOG_DIR/\${DOMAIN_NAME}.access.log;
+    }
+INNERINNEREOF
+fi )
+}
+INNEREOF
+)
+	    echo "\$NGINX_CONF_CONTENT" > "\$NGINX_CONF_FILE"
+	    chmod u+rw "\$NGINX_CONF_FILE"
+	    echo "✅ Configuration written to: \$NGINX_CONF_FILE"
+	    echo ""
+	    echo "🧪 Testing Nginx configuration..."
+	    if nginx -t; then
+		echo "✅ Configuration test passed!"
+	    else
+		echo "❌ Configuration test failed!"
+		exit 1
+	    fi
+	    echo ""
+	    echo "🔄 Reloading Nginx..."
+	    if [[ "\$OS_TYPE" == "windows" ]]; then
+		nginx -s reload
+	    fi
+	    sleep 2
+	    if ps -ef | grep -q "nginx"; then
+		echo "✅ Nginx reloaded successfully!"
+	    else
+		echo "❌ Nginx failed to reload!"
+		exit 1
+	    fi
+	}
+
+	# Verify setup
+	verify_setup() {
+	    local USE_HTTPS="\$1"
+	    echo ""
+	    echo "🔍 Verifying setup for \$DOMAIN_NAME..."
+	    if ps -ef | grep -q "nginx"; then
+		echo "✅ Nginx process is running"
+	    else
+		echo "❌ Nginx process not found"
+		return 1
+	    fi
+	    echo ""
+	    echo "Testing HTTP connection to \$DOMAIN_NAME..."
+	    local HTTP_CODE
+	    HTTP_CODE=\$(curl -s -o /dev/null -w "%{http_code}" "http://localhost" -H "Host: \$DOMAIN_NAME" 2>/dev/null || echo "000")
+	    if [[ "\$HTTP_CODE" =~ ^(200|301|302|404)\$ ]]; then
+		echo "✅ HTTP connection successful (Status: \$HTTP_CODE)"
+	    else
+		echo "⚠️  HTTP connection returned status: \$HTTP_CODE"
+	    fi
+	    if [ "\$USE_HTTPS" = "true" ] || [ "\$DOMAIN_NAME" != "localhost" ]; then
+		echo ""
+		echo "Testing HTTPS connection to \$DOMAIN_NAME..."
+		local HTTPS_CODE
+		HTTPS_CODE=\$(curl -s -o /dev/null -w "%{http_code}" "https://\$DOMAIN_NAME" --insecure 2>/dev/null || echo "000")
+		if [[ "\$HTTPS_CODE" =~ ^(200|301|302|404)\$ ]]; then
+		    echo "✅ HTTPS connection successful (Status: \$HTTPS_CODE)"
+		else
+		    echo "⚠️  HTTPS connection returned status: \$HTTPS_CODE"
+		fi
+	    fi
+	    echo ""
+	    echo "📋 Log files for \$DOMAIN_NAME:"
+	    echo "   - Error log:  \$LOG_DIR/\${DOMAIN_NAME}.error.log"
+	    echo "   - Access log: \$LOG_DIR/\${DOMAIN_NAME}.access.log"
+	}
+
+	# Print summary
+	print_summary() {
+	    local USE_HTTPS="\$1"
+	    echo ""
+	    echo "════════════════════════════════════════════════"
+	    echo "✅ Nginx Setup Complete!"
+	    echo "════════════════════════════════════════════════"
+	    echo ""
+	    echo "📋 Configuration Summary:"
+	    echo "   - Domain Name: \$DOMAIN_NAME"
+	    echo "   - Application Port: \$APP_PORT"
+	    echo "   - Protocol: \$( [ "\$USE_HTTPS" = "true" ] || [ "\$DOMAIN_NAME" != "localhost" ] && echo "HTTP & HTTPS" || echo "HTTP only")"
+	    echo ""
+	    if [ "\$USE_HTTPS" = "true" ] || [ "\$DOMAIN_NAME" != "localhost" ]; then
+		echo "🔐 SSL/TLS:"
+		echo "   - Certificate: /c/ProgramData/letsencrypt-winauto/live/\$DOMAIN_NAME/fullchain.pem"
+		echo "   - Auto-renewal: Enabled via win-acme"
+		echo ""
+	    fi
+	    echo "🌐 Access your application:"
+	    if [ "\$USE_HTTPS" = "true" ] || [ "\$DOMAIN_NAME" != "localhost" ]; then
+		echo "   - https://\$DOMAIN_NAME"
+		echo "   - http://\$DOMAIN_NAME (redirects to HTTPS)"
+	    else
+		echo "   - http://\$DOMAIN_NAME"
+	    fi
+	    echo ""
+	    echo "📝 Nginx Commands:"
+	    echo "   - Test config:   nginx -t"
+	    echo "   - Reload:        nginx -s reload"
+	    echo "   - Stop:          nginx -s stop"
+	    echo "   - Logs:          tail -f \$LOG_DIR/\${DOMAIN_NAME}.error.log"
+	    echo ""
+	    echo "📁 Files:"
+	    echo "   - Config:  \$NGINX_CONF_FILE"
+	    echo "   - Backups: \$NGINX_BACKUP_DIR/"
+	    echo "   - Logs:    \$LOG_DIR/"
+	    echo ""
+	    if [ "\$USE_HTTPS" = "false" ] && [ "\$DOMAIN_NAME" != "localhost" ]; then
+		echo "🔐 To add HTTPS later:"
+		echo "   1. Ensure DNS points to this server"
+		echo "   2. Run win-acme (wacs.exe)"
+		echo "   3. Re-run this script or manually update Nginx config"
+		echo ""
+	    fi
+	    echo "You can register the first organization from the URL given below: "
+	    echo "https://\$DOMAIN_NAME/register/org"
+	    echo "════════════════════════════════════════════════"
+	}
+
+	main() {
+	    echo "════════════════════════════════════════════════"
+	    echo "  HireTrack Nginx Setup Script (Windows)"
+	    echo "════════════════════════════════════════════════"
+	    echo ""
+	    prompt_for_domain
+	    prompt_for_email
+	    save_domain_to_config
+	    check_dns_resolution
+	    check_application
+	    install_nginx
+	    start_nginx
+	    local USE_HTTPS
+	    USE_HTTPS=\$(setup_ssl_certificate)
+	    configure_nginx "\$USE_HTTPS"
+	    verify_setup "\$USE_HTTPS"
+	    print_summary "\$USE_HTTPS"
+	}
+
+	main
+	EOF
+
+    chmod +x "$NGINX_SCRIPT"
+    echo "✅ Nginx setup script created at $NGINX_SCRIPT"
+
+    bash "$NGINX_SCRIPT" || {
+        echo "❌ Nginx setup failed. Check logs and try setting up the domain again by using the --domain command."
+        exit 1
+    }
+    echo "✅ Nginx setup completed."
+}
+restart_pm2_service() {
+    local VERSION_NAME=$(yq eval '.installedVersion // ""' "$CONFIG_PATH" | sed 's/^"//;s/"$//')
+    if [ -z "$VERSION_NAME" ]; then
+        echo "❌ No installed version found in config. Cannot restart PM2 service."
+        return 1
+    fi
+    echo "🔄 Restarting PM2 service for hiretrack-$VERSION_NAME..."
+    if pm2 list | grep -q "hiretrack-$VERSION_NAME"; then
+        pm2 restart "hiretrack-$VERSION_NAME" --log "$HOME/.myapp/pm2.log" || {
+            echo "❌ Failed to restart PM2 service hiretrack-$VERSION_NAME. Check $HOME/.myapp/pm2.log for details."
+            pm2 logs --lines 100 >> "$HOME/.myapp/pm2.log" 2>&1
+            cat "$HOME/.myapp/pm2.log"
+            return 1
+        }
+        pm2 save --force
+        echo "✅ PM2 service hiretrack-$VERSION_NAME restarted successfully."
+    else
+        echo "❌ PM2 process hiretrack-$VERSION_NAME not found. Attempting to start..."
+        pm2 start npm --name "hiretrack-$VERSION_NAME" -- start --cwd "$APP_INSTALL_DIR" --log "$HOME/.myapp/pm2.log" || {
+            echo "❌ Failed to start PM2 service hiretrack-$VERSION_NAME. Check $HOME/.myapp/pm2.log for details."
+            pm2 logs --lines 100 >> "$HOME/.myapp/pm2.log" 2>&1
+            cat "$HOME/.myapp/pm2.log"
+            return 1
+        }
+        pm2 save --force
+        echo "✅ PM2 service hiretrack-$VERSION_NAME started successfully."
+    fi
+}
+setup_cron() {
+    echo "🔧 Setting up cron (Windows Task Scheduler)..."
+
+    # Detect OS
+    local RAW_UNAME
+    RAW_UNAME=$(uname -s | tr '[:upper:]' '[:lower:]')
+
+    if echo "$RAW_UNAME" | grep -Eq 'mingw|msys|cygwin'; then
+        OS_TYPE="windows"
+    else
+        OS_TYPE="unix"
+    fi
+
+    # Convert paths for Windows (from /c/... → C:\...)
+    local SCRIPT_PATH_WIN CRON_LOG_FILE_WIN
+    if command -v cygpath >/dev/null 2>&1; then
+        SCRIPT_PATH_WIN=$(cygpath -w "$SCRIPT_PATH")
+        CRON_LOG_FILE_WIN=$(cygpath -w "$CRON_LOG_FILE")
+    else
+        SCRIPT_PATH_WIN="$SCRIPT_PATH"
+        CRON_LOG_FILE_WIN="$CRON_LOG_FILE"
+    fi
+
+    local CRON_NAME="hiretrack-autoupdate"
+    local CRON_COMMAND="bash \"$SCRIPT_PATH_WIN\" --update >> \"$CRON_LOG_FILE_WIN\" 2>&1"
+
+    if [[ "$OS_TYPE" == "windows" ]]; then
+        echo "💡 Detected Windows (Git Bash) environment."
+
+        # Check if the task already exists
+        cmd.exe /c "schtasks /query /tn \"$CRON_NAME\" >NUL 2>&1"
+        if [ $? -eq 0 ]; then
+            echo "♻️ Task '$CRON_NAME' already exists — updating command..."
+            cmd.exe /c "schtasks /change /tn \"$CRON_NAME\" /tr \"$CRON_COMMAND\" >NUL 2>&1"
+            if [ $? -eq 0 ]; then
+                echo "✅ Task '$CRON_NAME' command updated successfully."
+            else
+                echo "⚠️ Failed to update task — trying full re-create..."
+                cmd.exe /c "schtasks /delete /f /tn \"$CRON_NAME\" >NUL 2>&1"
+                cmd.exe /c "schtasks /create /tn \"$CRON_NAME\" /tr \"$CRON_COMMAND\" /sc minute /mo 2 /ru SYSTEM"
+                if [ $? -eq 0 ]; then
+                    echo "✅ Task '$CRON_NAME' recreated successfully."
+                else
+                    echo "❌ Failed to recreate Task Scheduler job."
+                fi
+            fi
+        else
+            echo "🕒 Creating new Task Scheduler job '$CRON_NAME' (every 2 minutes)..."
+            cmd.exe /c "schtasks /create /tn \"$CRON_NAME\" /tr \"$CRON_COMMAND\" /sc minute /mo 2 /ru SYSTEM"
+            if [ $? -eq 0 ]; then
+                echo "✅ Task '$CRON_NAME' successfully added (runs every 2 minutes)."
+            else
+                echo "❌ Failed to create Task Scheduler job."
+            fi
+        fi
+    else
+        echo "❌ Unsupported OS: $OS_TYPE — cron setup skipped."
+    fi
+}
+
+install_all() {
+    local EMAIL="$1"
+    [ -z "$EMAIL" ] && EMAIL=$(prompt_for_email)
+    echo "==== Starting installation for $EMAIL ===="
+
+    # Initialize config only once
+    create_default_config "$EMAIL"
+
+    # Proceed with license registration and other steps
+    if [ ! -f "$LICENSE_PATH" ]; then
+        register_license "$EMAIL"
+    else
+        echo "✅ License file already exists at $LICENSE_PATH. Skipping registration."
+    fi
+
+    check_update_and_install
+    setup_cron
+    # setup_nginx
+    # restart_pm2_service
+
+    # echo "==== Installation complete! ===="
+
+    # Add confirmation prompt for Nginx setup
+    echo "Now, you can set up Nginx for domain and SSL, or run locally on http://localhost:3000"
+    read -p "Do you want to continue with Nginx server setup? [y/N]: " confirm
+    confirm=${confirm:-N}
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        setup_nginx
+    else
+        echo "Skipping Nginx setup. The app is running locally via PM2."
+        echo "Access it at http://localhost:3000"
+        echo "You can set up Nginx later by running: bash installer.sh --domain"
+    fi
+
+    # restart_pm2_service
+
+    echo "==== Installation complete! ===="
+}
+
+# ------------------------------------------------
+# Main Entry Point
+# ------------------------------------------------
+check_dep curl
+check_dep 7z
+check_dep yq
+check_pm2
+
+case "${1:-}" in
+    --install)
+        install_all "${2:-}"
+        ;;
+    --register)
+        register_license "${2:-}"
+        ;;
+    --update)
+        check_update_and_install
+        ;;
+    --setup-cron)
+        setup_cron
+        ;;
+    --domain)
+        setup_nginx
+        ;;
+    --update-license)
+        update_license "${2:-}"
+        ;;
+    --help)
+        echo "Usage: $0 [--install [email]] [--register [email]] [--update] [--setup-cron] [--domain] [--update-license [email]]"
+        exit 0
+        ;;
+    *)
+        install_all "${2:-}"
+        ;;
+esac
