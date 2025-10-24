@@ -891,7 +891,10 @@ rollback() {
     echo "🔄 Rolling back to version $VERSION_TO_RESTORE..." | tee -a "$ROLLBACK_LOG_FILE"
 
     # Remove current install directory
-    rm -rf "$APP_INSTALL_DIR" 2>&1 | tee -a "$ROLLBACK_LOG_FILE"
+    # rm -rf "$APP_INSTALL_DIR" 2>&1 | tee -a "$ROLLBACK_LOG_FILE"
+    if [ -d "$APP_INSTALL_DIR" ]; then
+    sudo rm -rf --no-preserve-root "$APP_INSTALL_DIR" 2>&1 | tee -a "$ROLLBACK_LOG_FILE" || true
+    fi
 
     if [ -f "$BACKUP_FILE" ]; then
         mkdir -p "$APP_INSTALL_DIR" 2>&1 | tee -a "$ROLLBACK_LOG_FILE"
@@ -910,6 +913,7 @@ rollback() {
     fi
 
     echo "✅ Rollback completed." | tee -a "$ROLLBACK_LOG_FILE"
+    write_config "installedVersion" "$VERSION_TO_RESTORE"
 }
 
 # -------------------------------
@@ -1023,258 +1027,311 @@ rollback() {
 
 
 
+# check_update_and_install() {
+#     create_default_config
+#     local FLAG1="${1:-}"
+#     local FLAG2="${2:-}"
+#     local AUTO_UPDATE=$(jq -r '.autoUpdate' "$CONFIG_PATH")
+#     local INSTALLED_VERSION=$(jq -r '.installedVersion // "none"' "$CONFIG_PATH")
+#     local LOG_TO_FILE="false"
+#     local TIMESTAMP
+#     TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+
+#     # Enable logging only for manual updates
+#     if [ "$FLAG1" = "manually" ] || [ "$FLAG2" = "manually" ]; then
+#         LOG_TO_FILE="true"
+#         echo "[$TIMESTAMP] ⚡ Manual update triggered. Starting update process..." | tee -a "$MANUAL_LOG_FILE"
+#     fi
+
+#     # Skip auto-update if disabled and not a manual update
+#     if [ "$AUTO_UPDATE" != "true" ] && [ "$LOG_TO_FILE" != "true" ]; then
+#         echo "✅ Auto-update disabled in config. Keeping version: $INSTALLED_VERSION"
+#         return 0
+#     fi
+
+#     local LATEST_VERSION
+#     LATEST_VERSION=$(check_latest_version) || LATEST_VERSION=""
+#     local NORMALIZED_INSTALLED
+#     NORMALIZED_INSTALLED=$(echo "${INSTALLED_VERSION#v}" | tr -d '[:space:]')
+#     local NORMALIZED_LATEST
+#     NORMALIZED_LATEST=$(echo "${LATEST_VERSION#v}" | tr -d '[:space:]')
+
+#     if [ "$LOG_TO_FILE" = "true" ]; then
+#         echo "[$TIMESTAMP] 🔍 Checking versions: Installed='$INSTALLED_VERSION', Latest='$LATEST_VERSION'" | tee -a "$MANUAL_LOG_FILE"
+#     else
+#         echo "🔍 Checking versions: Installed='$INSTALLED_VERSION', Latest='$LATEST_VERSION'"
+#     fi
+
+#     if [ -z "$LATEST_VERSION" ]; then
+#         echo "❌ Unable to determine latest version. Aborting."
+#         return 1
+#     fi
+
+#     if [ "$INSTALLED_VERSION" != "none" ] && [ "$NORMALIZED_INSTALLED" = "$NORMALIZED_LATEST" ]; then
+#         echo "✅ Already up to date with version: $INSTALLED_VERSION"
+#         return 0
+#     fi
+
+#     echo "🚀 Update available: Current=$INSTALLED_VERSION, Latest=$LATEST_VERSION"
+
+#     local ASSET_URL
+#     ASSET_URL=$(validate_license_and_get_asset "$LATEST_VERSION") || ASSET_URL=""
+#     if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" = "null" ]; then
+#         echo "❌ Failed to retrieve asset URL for version $LATEST_VERSION"
+#         return 1
+#     fi
+
+#     local TMP_FILE="$HOME/.myapp/tmp_asset.tar.gz"
+#     echo "📥 Downloading update from: $ASSET_URL to $TMP_FILE"
+#     curl -L "$ASSET_URL" -o "$TMP_FILE" || {
+#         echo "❌ Failed to download update"
+#         return 1
+#     }
+
+#     local FILENAME
+#     FILENAME=$(basename "$ASSET_URL")
+#     local VERSION_NAME
+#     VERSION_NAME="${FILENAME%.tar.gz}"
+#     VERSION_NAME=${VERSION_NAME#hiretrack-}
+
+#     local BACKUP_FILE="$BACKUP_DIR/backup-$INSTALLED_VERSION.tar"
+#     mkdir -p "$BACKUP_DIR"
+#     if [ "$INSTALLED_VERSION" != "none" ] && [ -d "$APP_INSTALL_DIR/node_modules" ]; then
+#         echo "📦 Creating backup of current version $INSTALLED_VERSION..."
+#         rm -f "$BACKUP_DIR"/backup-*.tar 2>/dev/null
+#         (cd "$APP_INSTALL_DIR" && tar --exclude='node_modules' -cf "$BACKUP_FILE" .)
+#         echo "✅ Backup saved at: $BACKUP_FILE"
+#     else
+#         echo "⚠️ No valid installation found to backup"
+#     fi
+
+#     rm -rf "$APP_INSTALL_DIR"
+#     mkdir -p "$APP_INSTALL_DIR"
+#     if ! tar -xzf "$TMP_FILE" -C "$APP_INSTALL_DIR"; then
+#         echo "❌ Failed to extract update. Rolling back..."
+#         rollback "$INSTALLED_VERSION"
+#         return 1
+#     fi
+#     rm -f "$TMP_FILE"
+
+#     local DB_URL
+#     DB_URL=$(jq -r '.dbUrl // empty' "$CONFIG_PATH")
+#     [ -n "$DB_URL" ] && write_env_mongo_url "$APP_INSTALL_DIR" "$DB_URL"
+
+#     if [ ! -f "$APP_INSTALL_DIR/package.json" ]; then
+#         echo "❌ package.json not found in $APP_INSTALL_DIR"
+#         rollback "$INSTALLED_VERSION"
+#         return 1
+#     fi
+
+#     install_node "$APP_INSTALL_DIR" || {
+#         echo "❌ install_node failed"
+#         rollback "$INSTALLED_VERSION"
+#         return 1
+#     }
+
+#     local DB_CHOICE
+#     DB_CHOICE=$(jq -r '.dbChoice // empty' "$CONFIG_PATH")
+#     if [ "$DB_CHOICE" = "local" ]; then
+#         install_and_start_mongodb || {
+#             echo "❌ install_and_start_mongodb failed"
+#             return 1
+#         }
+#     elif [ "$DB_CHOICE" != "atlas" ] && [ -n "$DB_CHOICE" ]; then
+#         echo "❌ Invalid database choice: $DB_CHOICE"
+#         return 1
+#     fi
+
+#     cd "$APP_INSTALL_DIR" || {
+#         echo "❌ Failed to cd into $APP_INSTALL_DIR"
+#         rollback "$INSTALLED_VERSION"
+#         return 1
+#     }
+
+#     if ! npm install --legacy-peer-deps; then
+#         echo "❌ npm install failed. Rolling back..."
+#         rollback "$INSTALLED_VERSION"
+#         return 1
+#     fi
+
+#     # ✅ Use original PM2 start command (without --prefix)
+#     pm2 stop "hiretrack-$VERSION_NAME" 2>/dev/null || true
+#     pm2 delete "hiretrack-$VERSION_NAME" 2>/dev/null || true
+#     # pm2 kill || true
+#     if ! pm2 start "npm run start" --name "hiretrack-$VERSION_NAME" --cwd "$APP_INSTALL_DIR"; then
+#         echo "❌ Failed to start application. Rolling back..."
+#         rollback "$INSTALLED_VERSION"
+#         return 1
+#     fi
+
+#     sleep 5
+#     if ! pm2 describe "hiretrack-$VERSION_NAME" >/dev/null 2>&1; then
+#         echo "❌ Application failed to start (PM2 describe failed). Rolling back..."
+#         rollback "$INSTALLED_VERSION"
+#         return 1
+#     fi
+
+#     echo "✅ Successfully started version $VERSION_NAME"
+#     write_config "installedVersion" "$VERSION_NAME"
+
+#      # 🔪 Kill all old hiretrack processes before starting the new one
+#     echo "🧹 Cleaning up old PM2 processes..."
+#     mapfile -t old_processes < <(pm2 jlist 2>/dev/null | jq -r '.[] | select(.name | test("^hiretrack-")) | .name' || true)
+
+#     for proc in "${old_processes[@]:-}"; do
+#         echo "⏹ Stopping and deleting process: $proc"
+#         # pm2 stop "$proc" || true
+#         # sleep 1
+#         # pm2 delete "$proc" || true
+#         pm2 kill "$proc" || true
+#     done
+
+
+
+
+#     pm2 save --force
+
+#     if [ "$NORMALIZED_INSTALLED" != "none" ]; then
+#         echo "📦 Running migrations from $NORMALIZED_INSTALLED to $NORMALIZED_LATEST..."
+#         run_migrations "$NORMALIZED_INSTALLED" "$NORMALIZED_LATEST" || {
+#             echo "❌ Migrations failed. Rolling back..."
+#             rollback "$INSTALLED_VERSION"
+#             return 1
+#         }
+#     fi
+
+#     echo "✅ Successfully installed/updated to $VERSION_NAME at $APP_INSTALL_DIR"
+#     return 0
+# }
 check_update_and_install() {
     create_default_config
     local FLAG1="${1:-}"
     local FLAG2="${2:-}"
-    local AUTO_UPDATE=$(jq -r '.autoUpdate' "$CONFIG_PATH")
-    local INSTALLED_VERSION=$(jq -r '.installedVersion // "none"' "$CONFIG_PATH")
-    local LOG_TO_FILE="false"
+    local AUTO_UPDATE
+    AUTO_UPDATE=$(jq -r '.autoUpdate' "$CONFIG_PATH")
+    local INSTALLED_VERSION
+    INSTALLED_VERSION=$(jq -r '.installedVersion // "none"' "$CONFIG_PATH")
     local TIMESTAMP
     TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+    local LOG_TO_FILE="false"
 
-    # Enable logging only for manual updates
+    # 🔹 Detect manual update
     if [ "$FLAG1" = "manually" ] || [ "$FLAG2" = "manually" ]; then
         LOG_TO_FILE="true"
-        echo "[$TIMESTAMP] ⚡ Manual update triggered. Starting update process..." | tee -a "$MANUAL_LOG_FILE"
+        echo "[$TIMESTAMP] ⚡ Manual update triggered." | tee -a "$MANUAL_LOG_FILE"
     fi
 
-    # Skip auto-update if disabled and not a manual update
-    if [ "$AUTO_UPDATE" != "true" ] && [ "$LOG_TO_FILE" != "true" ]; then
-        echo "✅ Auto-update disabled in config. Keeping version: $INSTALLED_VERSION"
-        return 0
-    fi
-
-    local LATEST_VERSION
-    LATEST_VERSION=$(check_latest_version) || LATEST_VERSION=""
-    local NORMALIZED_INSTALLED
-    NORMALIZED_INSTALLED=$(echo "${INSTALLED_VERSION#v}" | tr -d '[:space:]')
-    local NORMALIZED_LATEST
-    NORMALIZED_LATEST=$(echo "${LATEST_VERSION#v}" | tr -d '[:space:]')
-
-    if [ "$LOG_TO_FILE" = "true" ]; then
-        echo "[$TIMESTAMP] 🔍 Checking versions: Installed='$INSTALLED_VERSION', Latest='$LATEST_VERSION'" | tee -a "$MANUAL_LOG_FILE"
-    else
-        echo "🔍 Checking versions: Installed='$INSTALLED_VERSION', Latest='$LATEST_VERSION'"
-    fi
-
-    if [ -z "$LATEST_VERSION" ]; then
-        echo "❌ Unable to determine latest version. Aborting."
-        return 1
-    fi
-
-    if [ "$INSTALLED_VERSION" != "none" ] && [ "$NORMALIZED_INSTALLED" = "$NORMALIZED_LATEST" ]; then
-        echo "✅ Already up to date with version: $INSTALLED_VERSION"
-        return 0
-    fi
-
-    echo "🚀 Update available: Current=$INSTALLED_VERSION, Latest=$LATEST_VERSION"
-
-    local ASSET_URL
-    ASSET_URL=$(validate_license_and_get_asset "$LATEST_VERSION") || ASSET_URL=""
-    if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" = "null" ]; then
-        echo "❌ Failed to retrieve asset URL for version $LATEST_VERSION"
-        return 1
-    fi
-
-    local TMP_FILE="$HOME/.myapp/tmp_asset.tar.gz"
-    echo "📥 Downloading update from: $ASSET_URL to $TMP_FILE"
-    curl -L "$ASSET_URL" -o "$TMP_FILE" || {
-        echo "❌ Failed to download update"
-        return 1
+    # 🔹 Helper: unified echo wrapper
+    log() {
+        local MSG="$1"
+        local NOW
+        NOW=$(date '+%Y-%m-%d %H:%M:%S')
+        if [ "$LOG_TO_FILE" = "true" ]; then
+            echo "[$NOW] $MSG" | tee -a "$MANUAL_LOG_FILE"
+        else
+            echo "$MSG"
+        fi
     }
 
-    local FILENAME
+    # ---------------------------------------------------
+    # Begin update process
+    # ---------------------------------------------------
+    if [ "$AUTO_UPDATE" != "true" ] && [ "$LOG_TO_FILE" != "true" ]; then
+        log "✅ Auto-update disabled. Keeping version: $INSTALLED_VERSION"
+        return 0
+    fi
+
+    log "🔍 Checking latest version..."
+    local LATEST_VERSION
+    LATEST_VERSION=$(check_latest_version) || { log "❌ Failed to fetch latest version."; return 1; }
+
+    local NORMALIZED_INSTALLED NORMALIZED_LATEST
+    NORMALIZED_INSTALLED=$(echo "${INSTALLED_VERSION#v}" | tr -d '[:space:]')
+    NORMALIZED_LATEST=$(echo "${LATEST_VERSION#v}" | tr -d '[:space:]')
+
+    log "📋 Installed: $INSTALLED_VERSION | Latest: $LATEST_VERSION"
+
+    if [ "$INSTALLED_VERSION" != "none" ] && [ "$NORMALIZED_INSTALLED" = "$NORMALIZED_LATEST" ]; then
+        log "✅ Already up to date."
+        return 0
+    fi
+
+    log "🚀 Update available: upgrading to $LATEST_VERSION"
+    local ASSET_URL
+    ASSET_URL=$(validate_license_and_get_asset "$LATEST_VERSION") || { log "❌ Failed to validate license."; return 1; }
+
+    local TMP_FILE="$HOME/.myapp/tmp_asset.tar.gz"
+    log "📥 Downloading $ASSET_URL → $TMP_FILE"
+    curl -L "$ASSET_URL" -o "$TMP_FILE" || { log "❌ Download failed."; return 1; }
+
+    local FILENAME VERSION_NAME
     FILENAME=$(basename "$ASSET_URL")
-    local VERSION_NAME
     VERSION_NAME="${FILENAME%.tar.gz}"
     VERSION_NAME=${VERSION_NAME#hiretrack-}
 
+    # Backup existing
     local BACKUP_FILE="$BACKUP_DIR/backup-$INSTALLED_VERSION.tar"
-    mkdir -p "$BACKUP_DIR"
-    if [ "$INSTALLED_VERSION" != "none" ] && [ -d "$APP_INSTALL_DIR/node_modules" ]; then
-        echo "📦 Creating backup of current version $INSTALLED_VERSION..."
-        rm -f "$BACKUP_DIR"/backup-*.tar 2>/dev/null
-        (cd "$APP_INSTALL_DIR" && tar --exclude='node_modules' -cf "$BACKUP_FILE" .)
-        echo "✅ Backup saved at: $BACKUP_FILE"
+    if [ "$INSTALLED_VERSION" != "none" ] && [ -d "$APP_INSTALL_DIR" ]; then
+        log "📦 Backing up current version..."
+        tar --exclude='node_modules' -cf "$BACKUP_FILE" -C "$APP_INSTALL_DIR" .
+        log "✅ Backup saved at: $BACKUP_FILE"
     else
-        echo "⚠️ No valid installation found to backup"
+        log "⚠️ No existing installation to back up."
     fi
 
+    # Extract
     rm -rf "$APP_INSTALL_DIR"
     mkdir -p "$APP_INSTALL_DIR"
     if ! tar -xzf "$TMP_FILE" -C "$APP_INSTALL_DIR"; then
-        echo "❌ Failed to extract update. Rolling back..."
+        log "❌ Extraction failed. Rolling back..."
         rollback "$INSTALLED_VERSION"
         return 1
     fi
     rm -f "$TMP_FILE"
-
-    local DB_URL
+    log "✅ Extracted to: $APP_INSTALL_DIR"
+    # Database setup
+    local DB_URL DB_CHOICE
     DB_URL=$(jq -r '.dbUrl // empty' "$CONFIG_PATH")
+    DB_CHOICE=$(jq -r '.dbChoice // empty' "$CONFIG_PATH")
     [ -n "$DB_URL" ] && write_env_mongo_url "$APP_INSTALL_DIR" "$DB_URL"
 
-    if [ ! -f "$APP_INSTALL_DIR/package.json" ]; then
-        echo "❌ package.json not found in $APP_INSTALL_DIR"
-        rollback "$INSTALLED_VERSION"
-        return 1
-    fi
+    install_node "$APP_INSTALL_DIR" || { log "❌ Node install failed."; rollback "$INSTALLED_VERSION"; return 1; }
+    [ "$DB_CHOICE" = "local" ] && install_and_start_mongodb
 
-    install_node "$APP_INSTALL_DIR" || {
-        echo "❌ install_node failed"
-        rollback "$INSTALLED_VERSION"
-        return 1
-    }
+    cd "$APP_INSTALL_DIR" || { log "❌ Failed to cd into app dir."; rollback "$INSTALLED_VERSION"; return 1; }
 
-    local DB_CHOICE
-    DB_CHOICE=$(jq -r '.dbChoice // empty' "$CONFIG_PATH")
-    if [ "$DB_CHOICE" = "local" ]; then
-        install_and_start_mongodb || {
-            echo "❌ install_and_start_mongodb failed"
-            return 1
-        }
-    elif [ "$DB_CHOICE" != "atlas" ] && [ -n "$DB_CHOICE" ]; then
-        echo "❌ Invalid database choice: $DB_CHOICE"
-        return 1
-    fi
+    npm install --legacy-peer-deps || { log "❌ npm install failed."; rollback "$INSTALLED_VERSION"; return 1; }
 
-    cd "$APP_INSTALL_DIR" || {
-        echo "❌ Failed to cd into $APP_INSTALL_DIR"
+    # ---------------------------------------------------
+    # PM2 Restart Logic (fixed and robust)
+    # ---------------------------------------------------
+    log "🚀 Restarting PM2 process..."
+    export PM2_HOME="$HOME/.pm2"
+
+    # Kill all old hiretrack processes safely
+    log "🗑️ Cleaning up old PM2 processes..."
+    pm2 kill || true
+
+    # Start new hiretrack process
+    pm2 start "npm run start" --name "hiretrack-$VERSION_NAME" --cwd "$APP_INSTALL_DIR" || {
+        log "❌ Failed to start. Rolling back..."
+        pm2 delete "hiretrack-$VERSION_NAME" || true
         rollback "$INSTALLED_VERSION"
         return 1
     }
 
-    if ! npm install --legacy-peer-deps; then
-        echo "❌ npm install failed. Rolling back..."
-        rollback "$INSTALLED_VERSION"
-        return 1
-    fi
-
-    # ✅ Use original PM2 start command (without --prefix)
-    pm2 stop "hiretrack-$VERSION_NAME" 2>/dev/null || true
-    pm2 delete "hiretrack-$VERSION_NAME" 2>/dev/null || true
-    # pm2 kill || true
-    if ! pm2 start "npm run start" --name "hiretrack-$VERSION_NAME" --cwd "$APP_INSTALL_DIR"; then
-        echo "❌ Failed to start application. Rolling back..."
-        rollback "$INSTALLED_VERSION"
-        return 1
-    fi
-
-    sleep 5
-    if ! pm2 describe "hiretrack-$VERSION_NAME" >/dev/null 2>&1; then
-        echo "❌ Application failed to start (PM2 describe failed). Rolling back..."
-        rollback "$INSTALLED_VERSION"
-        return 1
-    fi
-
-    echo "✅ Successfully started version $VERSION_NAME"
-    write_config "installedVersion" "$VERSION_NAME"
-
-     # 🔪 Kill all old hiretrack processes before starting the new one
-    echo "🧹 Cleaning up old PM2 processes..."
-    mapfile -t old_processes < <(pm2 jlist 2>/dev/null | jq -r '.[] | select(.name | test("^hiretrack-")) | .name' || true)
-
-    for proc in "${old_processes[@]:-}"; do
-        echo "⏹ Stopping and deleting process: $proc"
-        # pm2 stop "$proc" || true
-        # sleep 1
-        # pm2 delete "$proc" || true
-        pm2 kill "$proc" || true
-    done
-
-
-
-
-    pm2 save --force
+    pm2 save --force >/dev/null 2>&1 || true
 
     if [ "$NORMALIZED_INSTALLED" != "none" ]; then
-        echo "📦 Running migrations from $NORMALIZED_INSTALLED to $NORMALIZED_LATEST..."
+        log "📦 Running migrations from $NORMALIZED_INSTALLED to $NORMALIZED_LATEST..."
         run_migrations "$NORMALIZED_INSTALLED" "$NORMALIZED_LATEST" || {
-            echo "❌ Migrations failed. Rolling back..."
+            log "❌ Migrations failed. Rolling back..."
             rollback "$INSTALLED_VERSION"
             return 1
         }
     fi
-
-    echo "✅ Successfully installed/updated to $VERSION_NAME at $APP_INSTALL_DIR"
-    return 0
-}
-
-
-
-
-
-install_specific_version() {
-    local VERSION="$1"
-    [ -z "$VERSION" ] && VERSION=$(prompt_for_version)
-    local VERSION_NAME=${VERSION#hiretrack-}
-    echo "📦 Installing version: $VERSION_NAME"
-
-    local BACKUP_FILE="$BACKUP_DIR/hiretrack-app-backup.tar.gz"
-    if [ -d "$APP_INSTALL_DIR" ] && [ "$(ls -A "$APP_INSTALL_DIR")" ]; then
-        tar -czf "$BACKUP_FILE" -C "$APP_INSTALL_DIR" .
-        echo "📦 Backup saved: $BACKUP_FILE"
-    else
-        echo "⚠️ No existing APP to backup."
-    fi
-
-    local RELEASE_FILE="$RELEASES_DIR/hiretrack-$VERSION_NAME.tar.gz"
-    if [ ! -f "$RELEASE_FILE" ]; then
-        echo "📥 Downloading release $VERSION_NAME..."
-        local ASSET_URL=$(validate_license_and_get_asset "$VERSION_NAME")
-        curl -L "$ASSET_URL" -o "$RELEASE_FILE" || { echo "❌ Failed to download."; return 1; }
-        echo "✅ Release tarball saved: $RELEASE_FILE"
-    else
-        echo "✅ Using cached release: $RELEASE_FILE"
-    fi
-
-    rm -rf "$TMP_INSTALL_DIR"/*
-    tar -xzf "$RELEASE_FILE" -C "$TMP_INSTALL_DIR" || {
-        echo "❌ Failed to extract. Rolling back..."
-        rm -rf "$APP_INSTALL_DIR"/*
-        tar -xzf "$BACKUP_FILE" -C "$APP_INSTALL_DIR"
-        return 1
-    }
-
-    local MONGO_URL=$(jq -r '.dbUrl // empty' "$CONFIG_PATH")
-    export MONGODB_URI="$MONGO_URL"
-    echo "✅ Using MongoDB: $MONGO_URL"
-
-    local INSTALLED_VERSION=$(jq -r '.installedVersion // empty' "$CONFIG_PATH")
-    if [ -n "$INSTALLED_VERSION" ] && pm2 list | grep -q "hiretrack-$INSTALLED_VERSION"; then
-        echo "⏹ Stopping old version hiretrack-$INSTALLED_VERSION..."
-        pm2 stop "hiretrack-$INSTALLED_VERSION" || true
-        pm2 delete "hiretrack-$INSTALLED_VERSION" || true
-    fi
-
-    rm -rf "$APP_INSTALL_DIR"/*
-    cp -r "$TMP_INSTALL_DIR"/* "$APP_INSTALL_DIR/" || {
-        echo "❌ Failed to copy. Rolling back..."
-        rm -rf "$APP_INSTALL_DIR"/*
-        tar -xzf "$BACKUP_FILE" -C "$APP_INSTALL_DIR"
-        return 1
-    }
-
-    cd "$APP_INSTALL_DIR" || exit
-    npm install --legacy-peer-deps || {
-        echo "❌ npm install failed. Rolling back..."
-        rm -rf "$APP_INSTALL_DIR"/*
-        tar -xzf "$BACKUP_FILE" -C "$APP_INSTALL_DIR"
-        return 1
-    }
-
-    echo "🚀 Starting hiretrack-$VERSION_NAME with PM2..."
-    pm2 start "npm run start" --name "hiretrack-$VERSION_NAME" --cwd "$APP_INSTALL_DIR" || {
-        echo "❌ Failed to start. Rolling back..."
-        rm -rf "$APP_INSTALL_DIR"/*
-        tar -xzf "$BACKUP_FILE" -C "$APP_INSTALL_DIR"
-        pm2 start "npm run start" --name "hiretrack-$INSTALLED_VERSION" --cwd "$APP_INSTALL_DIR"
-        return 1
-    }
-    pm2 save --force
-
+    log "✅ Successfully installed/updated to $VERSION_NAME at $APP_INSTALL_DIR"
     write_config "installedVersion" "$VERSION_NAME"
-    echo "✅ Installed version $VERSION_NAME and started as PM2 service hiretrack-$VERSION_NAME"
 }
 
 
@@ -1315,7 +1372,7 @@ run_migrations() {
     # Sort versions semantically and filter between CURRENT and TARGET if provided
     local FILTERED_VERSIONS
     FILTERED_VERSIONS="$(echo "$VERSIONS" | sort -V | awk -v CUR="$CURRENT_VERSION" -v TGT="$TARGET_VERSION" '
-        (CUR == "none" || $0 >= CUR) && (TGT == "none" || $0 <= TGT) { print $0 }'
+        (CUR == "none" || $0 > CUR) && (TGT == "none" || $0 <= TGT) { print $0 }'
     )"
 
     mkdir -p "$TMP_INSTALL_DIR" "$APP_INSTALL_DIR" "$LOG_DIR" >/dev/null 2>&1 || true
@@ -2334,9 +2391,7 @@ check_dep jq
 check_dep tar
 check_dep shasum
 check_pm2
-# --install-version)
-    #     install_specific_version "${2:-}"
-    #     ;;
+
 case "${1:-}" in
     --install)
         install_all "${2:-}"
@@ -2345,7 +2400,7 @@ case "${1:-}" in
         register_license "${2:-}"
         ;;
     --update)
-	check_update_and_install "${2:-}" "${3:-}"
+	    check_update_and_install "${2:-}" "${3:-}"
        	;;
     --run-migrations)
         run_migrations "${2:-}" "${3:-}"
@@ -2374,9 +2429,6 @@ case "${1:-}" in
         ;;
     --update-license)
         update_license "${2:-}"
-        ;;
-    --install-version)
-        install_specific_version "${2:-}"
         ;;
     --help)
         echo "Usage: $0 [--install [email]] [--register [email]] [--update] [--setup-cron]"
