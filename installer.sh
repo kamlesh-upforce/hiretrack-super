@@ -7,7 +7,6 @@ set -euo pipefail
 INSTALLER_DEST="$HOME/.myapp/installer.sh"
 APP_INSTALL_DIR="$HOME/.myapp/APP"
 BACKUP_DIR="$HOME/.myapp/backup"
-RELEASES_DIR="$HOME/.myapp/releases"
 TMP_INSTALL_DIR="$HOME/.myapp/tmp_install"
 CONFIG_PATH="$HOME/.myapp/config.json"
 LICENSE_PATH="$HOME/.myapp/license.json"
@@ -25,7 +24,7 @@ LATEST_VERSION_API="https://hiretrack-super-bunny.vercel.app/api/version/list"
 MONGODB_VERSION="${MONGODB_VERSION:-7.0}"
 NODE_VERSION_DEFAULT=20
 
-mkdir -p "$APP_INSTALL_DIR" "$BACKUP_DIR" "$RELEASES_DIR" "$TMP_INSTALL_DIR" "$LOG_DIR"
+mkdir -p "$APP_INSTALL_DIR" "$BACKUP_DIR" "$TMP_INSTALL_DIR" "$LOG_DIR"
 
 # ------------------------------------------------
 # Auto-copy Installer
@@ -344,9 +343,9 @@ create_default_config() {
         fi
         local EXISTING_EMAIL
         EXISTING_EMAIL=$(jq -r '.email // empty' "$CONFIG_PATH" 2>/dev/null || echo "")
-        if [ -n "$EXISTING_EMAIL" ]; then
-            echo "Existing email"
-            exit 1
+        if [ -n "$EXISTING_EMAIL" ] && [ "$EXISTING_EMAIL" != "$PASSED_EMAIL" ]; then
+           echo "Existing email"
+           exit 0
         fi
     fi
 }
@@ -894,9 +893,14 @@ check_update_and_install() {
 
     log "📋 Installed: $INSTALLED_VERSION | Latest: $LATEST_VERSION"
 
-    if [ "$INSTALLED_VERSION" != "none" ] && [ "$NORMALIZED_INSTALLED" = "$NORMALIZED_LATEST" ]; then
-        log "✅ Already up to date."
-        return 0
+    if [ "$INSTALLED_VERSION" != "none" ] && [ "$NORMALIZED_INSTALLED" = "$NORMALIZED_LATEST" ] ; then
+        # Ensure the app directory actually contains files (not empty)
+        if [ -d "$APP_INSTALL_DIR" ] && [ "$(find "$APP_INSTALL_DIR" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+            log "✅ Already up to date."
+            return 0
+        else
+            log "⚠️ Installed version matches latest but $APP_INSTALL_DIR appears empty. Proceeding with reinstall/update."
+        fi
     fi
 
     log "🚀 Update available: upgrading to $LATEST_VERSION"
@@ -1991,20 +1995,92 @@ INNEREOF
 # ------------------------------------------------
 # Restart PM2 Service
 # ------------------------------------------------
-restart_pm2_service() {
-    local VERSION_NAME=$(jq -r '.installedVersion // empty' "$CONFIG_PATH")
-    if [ -z "$VERSION_NAME" ]; then
-        echo "❌ No installed version found in config. Cannot restart PM2 service."
-        return 1
-    fi
+# restart_pm2_service() {
+#     local VERSION_NAME=$(jq -r '.installedVersion // empty' "$CONFIG_PATH")
+#     if [ -z "$VERSION_NAME" ]; then
+#         echo "❌ No installed version found in config. Cannot restart PM2 service."
+#         return 1
+#     fi
+#     if ! command -v pm2 >/dev/null 2>&1; then
+#         echo "❌ pm2 not installed. Cannot restart service."
+#         return 1
+#     fi
 
-    echo "🔄 Restarting PM2 service for hiretrack-$VERSION_NAME..."
-    pm2 restart "hiretrack-$VERSION_NAME" || {
-        echo "❌ Failed to restart PM2 service hiretrack-$VERSION_NAME."
-        return 1
-    }
-    pm2 save --force
-    echo "✅ PM2 service hiretrack-$VERSION_NAME restarted successfully."
+#     if [ ! -d "$APP_INSTALL_DIR" ]; then
+#         echo "❌ App install directory not found: $APP_INSTALL_DIR"
+#         return 1
+#     fi
+
+#     # Prefer restarting via ecosystem file inside the app dir
+#     if [ -f "$APP_INSTALL_DIR/ecosystem.config.cjs" ]; then
+#         echo "🔄 Restarting PM2 using ecosystem.config.cjs in $APP_INSTALL_DIR..."
+#         (cd "$APP_INSTALL_DIR" && pm2 restart ecosystem.config.cjs) || {
+#             echo "❌ Failed to restart using ecosystem.config.cjs"
+#             return 1
+#         }
+#     elif [ -f "$APP_INSTALL_DIR/ecosystem.config.js" ]; then
+#         echo "🔄 Restarting PM2 using ecosystem.config.js in $APP_INSTALL_DIR..."
+#         (cd "$APP_INSTALL_DIR" && pm2 restart ecosystem.config.js) || {
+#             echo "❌ Failed to restart using ecosystem.config.js"
+#             return 1
+#         }
+#     else
+#         # Fallback to named process restart
+#         local PM2_PROC="hiretrack-$VERSION_NAME"
+#         echo "⚠️  No ecosystem file found. Falling back to pm2 restart $PM2_PROC"
+#         if pm2 list 2>/dev/null | grep -Fq "$PM2_PROC"; then
+#             pm2 restart "$PM2_PROC" || {
+#                 echo "❌ Failed to restart PM2 process $PM2_PROC"
+#                 return 1
+#             }
+#         else
+#             echo "⚠ PM2 process '$PM2_PROC' not found. Nothing to restart."
+#             pm2 start ecosystem.cjs
+#             return 0
+#         fi
+#     fi
+#     pm2 save --force
+#     echo "✅ PM2 service hiretrack-$VERSION_NAME restarted successfully."
+# }
+restart_pm2_service() {
+    local MATCHING_PROCS
+    local ECOSYSTEM_FILE=""
+
+    echo "🔍 Checking for existing hiretrack-* PM2 processes..."
+
+    # Capture all running hiretrack-* processes (if any)
+    MATCHING_PROCS=$(pm2 list 2>/dev/null | awk '/hiretrack-/ {print $4}' | tr -d '│')
+
+    if [ -n "$MATCHING_PROCS" ]; then
+        echo "♻️  Found running hiretrack processes:"
+        echo "$MATCHING_PROCS" | sed 's/^/   • /'
+        echo "🔄 Restarting all matching PM2 processes..."
+
+        echo "$MATCHING_PROCS" | while read -r PROC; do
+            [ -n "$PROC" ] && pm2 restart "$PROC" || echo "⚠️ Failed to restart $PROC"
+        done
+    else
+        echo "⚠️  No hiretrack-* process found. Starting ecosystem..."
+
+        if [ -d "$APP_INSTALL_DIR" ]; then
+            cd "$APP_INSTALL_DIR" || { echo "❌ Failed to enter $APP_INSTALL_DIR"; return 1; }
+
+            # Check for ecosystem.config.cjs or ecosystem.config.js
+            if [ -f "ecosystem.config.cjs" ]; then
+                ECOSYSTEM_FILE="ecosystem.config.cjs"
+            elif [ -f "ecosystem.config.js" ]; then
+                ECOSYSTEM_FILE="ecosystem.config.js"
+            else
+                echo "❌ No ecosystem file found in $APP_INSTALL_DIR"
+                return 1
+            fi
+
+            pm2 start "$ECOSYSTEM_FILE" && echo "✅ PM2 started successfully using $ECOSYSTEM_FILE."
+        else
+            echo "❌ Directory $APP_INSTALL_DIR not found"
+            return 1
+        fi
+    fi
 }
 
 # ------------------------------------------------
