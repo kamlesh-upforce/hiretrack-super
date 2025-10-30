@@ -34,7 +34,7 @@ This guide provides essential steps to install and configure the HireTrack appli
    ```
 
    > The installer will automatically:
-   > - Copy itself to `~/.myapp/installer.sh` for future use
+   > - Copy itself to `~/.hiretrack/installer.sh` for future use
    > - Install Node.js, PM2, and MongoDB (if needed)
    > - Register license
    > - Download and deploy the latest version
@@ -173,4 +173,4 @@ sudo systemctl reload nginx
 
 For issues, contact the **HireTrack Super Admin**.
 
-> **Note**: The installer auto-copies itself to `~/.myapp/installer.sh` and can be reused anytime.
+> **Note**: The installer auto-copies itself to `~/.hiretrack/installer.sh` and can be reused anytime.

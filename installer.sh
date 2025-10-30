@@ -4,14 +4,14 @@ set -euo pipefail
 # ------------------------------------------------
 # Constants and Environment Variables
 # ------------------------------------------------
-INSTALLER_DEST="$HOME/.myapp/installer.sh"
-APP_INSTALL_DIR="$HOME/.myapp/APP"
-BACKUP_DIR="$HOME/.myapp/backup"
-TMP_INSTALL_DIR="$HOME/.myapp/tmp_install"
-CONFIG_PATH="$HOME/.myapp/config.json"
-LICENSE_PATH="$HOME/.myapp/license.json"
-SCRIPT_PATH="$HOME/.myapp/installer.sh"
-LOG_DIR="$HOME/.myapp/logs"
+INSTALLER_DEST="$HOME/.hiretrack/installer.sh"
+APP_INSTALL_DIR="$HOME/.hiretrack/APP"
+BACKUP_DIR="$HOME/.hiretrack/backup"
+TMP_INSTALL_DIR="$HOME/.hiretrack/tmp_install"
+CONFIG_PATH="$HOME/.hiretrack/config.json"
+LICENSE_PATH="$HOME/.hiretrack/license.json"
+SCRIPT_PATH="$HOME/.hiretrack/installer.sh"
+LOG_DIR="$HOME/.hiretrack/logs"
 CRON_LOG_FILE="$LOG_DIR/cron_update.log"
 MANUAL_LOG_FILE="$LOG_DIR/manual_update.log"
 ROLLBACK_LOG_FILE="$LOG_DIR/rollback.log"
@@ -30,8 +30,8 @@ mkdir -p "$APP_INSTALL_DIR" "$BACKUP_DIR" "$TMP_INSTALL_DIR" "$LOG_DIR"
 # Auto-copy Installer
 # ------------------------------------------------
 if [ "$(realpath "$0")" != "$INSTALLER_DEST" ]; then
-    echo "📦 Copying installer to $HOME/.myapp..."
-    mkdir -p "$HOME/.myapp"
+    echo "📦 Copying installer to $HOME/.hiretrack..."
+    mkdir -p "$HOME/.hiretrack"
     cp "$0" "$INSTALLER_DEST"
     chmod +x "$INSTALLER_DEST"
     echo "✅ Installer ready at $INSTALLER_DEST"
@@ -597,7 +597,7 @@ rollback() {
 #         exit 1
 #     fi
 
-#     local TMP_FILE="$HOME/.myapp/tmp_asset.tar.gz"
+#     local TMP_FILE="$HOME/.hiretrack/tmp_asset.tar.gz"
 #     curl -L "$ASSET_URL" -o "$TMP_FILE" || { echo "❌ Download failed."; exit 1; }
 
 #     local FILENAME=$(basename "$ASSET_URL")
@@ -724,7 +724,7 @@ rollback() {
 #         return 1
 #     fi
 
-#     local TMP_FILE="$HOME/.myapp/tmp_asset.tar.gz"
+#     local TMP_FILE="$HOME/.hiretrack/tmp_asset.tar.gz"
 #     echo "📥 Downloading update from: $ASSET_URL to $TMP_FILE"
 #     curl -L "$ASSET_URL" -o "$TMP_FILE" || {
 #         echo "❌ Failed to download update"
@@ -907,7 +907,7 @@ check_update_and_install() {
     local ASSET_URL
     ASSET_URL=$(validate_license_and_get_asset "$LATEST_VERSION") || { log "❌ Failed to validate license."; return 1; }
 
-    local TMP_FILE="$HOME/.myapp/tmp_asset.tar.gz"
+    local TMP_FILE="$HOME/.hiretrack/tmp_asset.tar.gz"
     log "📥 Downloading $ASSET_URL → $TMP_FILE"
     curl -L "$ASSET_URL" -o "$TMP_FILE" || { log "❌ Download failed."; return 1; }
 
@@ -1099,7 +1099,7 @@ run_migrations() {
 # Nginx Setup Script
 # ------------------------------------------------
 setup_nginx() {
-    local NGINX_SCRIPT="$HOME/.myapp/nginx_setup.sh"
+    local NGINX_SCRIPT="$HOME/.hiretrack/nginx_setup.sh"
     echo "🚀 Generating and running Nginx setup script..."
 
     cat <<-EOF > "$NGINX_SCRIPT"
@@ -1123,9 +1123,9 @@ setup_nginx() {
 	# ------------------------------------------------
 	# Configuration Paths
 	# ------------------------------------------------
-	CONFIG_PATH="$HOME/.myapp/config.json"
+	CONFIG_PATH="$HOME/.hiretrack/config.json"
 	APP_PORT="\${APP_PORT:-3000}"
-	NGINX_BACKUP_DIR="$HOME/.myapp/nginx-backups"
+	NGINX_BACKUP_DIR="$HOME/.hiretrack/nginx-backups"
 	NGINX_CONF_DIR="/etc/nginx/sites-available"
 	NGINX_ENABLED_DIR="/etc/nginx/sites-enabled"
 
@@ -2120,15 +2120,12 @@ install_all() {
     check_update_and_install
     setup_cron
     setup_nginx
+    write_env_server_details
     restart_pm2_service
 
     echo "==== Installation complete! ===="
     exit 0
 }
-    # --help)
-    #     echo "Usage: $0 [--install [email]] [--register [email]] [--update] [--setup-cron]"
-    #     exit 0
-    #     ;;
 
 # ------------------------------------------------
 # Main Entry Point

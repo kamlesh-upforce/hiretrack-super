@@ -2,11 +2,11 @@
 set -e
 
 # ---------------------------------------------
-# 📦 Backup Script for .myapp (Exclude node_modules)
+# 📦 Backup Script for .hiretrack (Exclude node_modules)
 # ---------------------------------------------
 
 ROOT_DIR="$PWD"
-MYAPP_DIR="$ROOT_DIR/.myapp"
+MYAPP_DIR="$ROOT_DIR/.hiretrack"
 BACKUP_DIR="$ROOT_DIR/hiretrack-backup"
 BACKUP_FILE="$BACKUP_DIR/myapp_backup.tar.gz"
 
@@ -53,9 +53,9 @@ install_mongodump() {
 # 🧩 Pre-checks
 # ---------------------------------------------
 
-# Ensure .myapp exists
+# Ensure .hiretrack exists
 if [ ! -d "$MYAPP_DIR" ]; then
-    log "❌ .myapp directory not found in root ($ROOT_DIR)"
+    log "❌ .hiretrack directory not found in root ($ROOT_DIR)"
     exit 1
 fi
 
@@ -107,7 +107,7 @@ fi
 
 # Step 2: Create tar.gz backup excluding node_modules
 log "📦 Creating backup (excluding node_modules)..."
-tar --exclude='*/node_modules' -czf "$BACKUP_FILE" -C "$ROOT_DIR" ".myapp"
+tar --exclude='*/node_modules' -czf "$BACKUP_FILE" -C "$ROOT_DIR" ".hiretrack"
 
 # Step 3: Confirm
 log "✅ Backup created successfully!"
