@@ -4,15 +4,16 @@ set -euo pipefail
 # ------------------------------------------------
 # Constants and Environment Variables
 # ------------------------------------------------
-INSTALLER_DEST="$HOME/.hiretrack/installer.sh"
 APP_INSTALL_DIR="$HOME/.hiretrack/APP"
 BACKUP_DIR="$HOME/.hiretrack/backup"
 TMP_INSTALL_DIR="$HOME/.hiretrack/tmp_install"
 CONFIG_PATH="$HOME/.hiretrack/config.json"
 LICENSE_PATH="$HOME/.hiretrack/license.json"
 SCRIPT_PATH="$HOME/.hiretrack/installer.sh"
+SNAPSHOT_SCRIPT="$HOME/.hiretrack/take-snapshot.js"
 LOG_DIR="$HOME/.hiretrack/logs"
 CRON_LOG_FILE="$LOG_DIR/cron_update.log"
+SNAPSHOT_LOG_FILE="$LOG_DIR/snapshot.log"
 MANUAL_LOG_FILE="$LOG_DIR/manual_update.log"
 ROLLBACK_LOG_FILE="$LOG_DIR/rollback.log"
 
@@ -29,16 +30,16 @@ mkdir -p "$APP_INSTALL_DIR" "$BACKUP_DIR" "$TMP_INSTALL_DIR" "$LOG_DIR"
 # ------------------------------------------------
 # Auto-copy Installer
 # ------------------------------------------------
-if [ "$(realpath "$0")" != "$INSTALLER_DEST" ]; then
+if [ "$(realpath "$0")" != "$SCRIPT_PATH" ]; then
     echo "📦 Copying installer to $HOME/.hiretrack..."
     mkdir -p "$HOME/.hiretrack"
-    cp "$0" "$INSTALLER_DEST"
-    chmod +x "$INSTALLER_DEST"
-    echo "✅ Installer ready at $INSTALLER_DEST"
-    #echo "▶️ Please re-run the installer: $INSTALLER_DEST --install"
+    cp "$0" "$SCRIPT_PATH"
+    chmod +x "$SCRIPT_PATH"
+    echo "✅ Installer ready at $SCRIPT_PATH"
+    #echo "▶️ Please re-run the installer: $SCRIPT_PATH --install"
     echo "🚀 Auto-running installer with --install..."
-    #exec "$INSTALLER_DEST" --install
-    exec "$INSTALLER_DEST" "$@"
+    #exec "$SCRIPT_PATH" --install
+    exec "$SCRIPT_PATH" "$@"
     exit 0
 fi
 
@@ -410,7 +411,6 @@ register_license() {
 
     local RESPONSE
     RESPONSE=$(curl -s -X POST "$API_URL" -H "Content-Type: application/json" -d "{\"email\":\"$EMAIL\",\"machineCode\":\"$MACHINE_CODE\"}")
-    echo "RESPONSE-REGISTERATION: $RESPONSE"
 
     if [ -z "$RESPONSE" ] || ! echo "$RESPONSE" | jq . >/dev/null 2>&1; then
         echo "❌ License registration failed: Invalid response."
@@ -521,6 +521,46 @@ check_latest_version() {
 # -------------------------------
 # Rollback helper function
 # -------------------------------
+# rollback() {
+#     local VERSION_TO_RESTORE="${1:-}"   # default to empty string if not passed
+
+#     if [ -z "$VERSION_TO_RESTORE" ]; then
+#         echo "❌ rollback() called without a version" | tee -a "$ROLLBACK_LOG_FILE"
+#         return 1
+#     fi
+
+#     # Ensure BACKUP_DIR is defined
+#     local BACKUP_DIR="${BACKUP_DIR:-$LOG_DIR/backups}"  
+#     local BACKUP_FILE="$BACKUP_DIR/backup-$VERSION_TO_RESTORE.tar"
+
+#     echo "🔄 Rolling back to version $VERSION_TO_RESTORE..." | tee -a "$ROLLBACK_LOG_FILE"
+
+#     # Remove current install directory
+#     # rm -rf "$APP_INSTALL_DIR" 2>&1 | tee -a "$ROLLBACK_LOG_FILE"
+#     if [ -d "$APP_INSTALL_DIR" ]; then
+#     sudo rm -rf --no-preserve-root "$APP_INSTALL_DIR" 2>&1 | tee -a "$ROLLBACK_LOG_FILE" || true
+#     fi
+
+#     if [ -f "$BACKUP_FILE" ]; then
+#         mkdir -p "$APP_INSTALL_DIR" 2>&1 | tee -a "$ROLLBACK_LOG_FILE"
+#         tar -xf "$BACKUP_FILE" -C "$APP_INSTALL_DIR" 2>&1 | tee -a "$ROLLBACK_LOG_FILE"
+#         cd "$APP_INSTALL_DIR" || exit
+#         echo "📦 Restoring dependencies..." | tee -a "$ROLLBACK_LOG_FILE"
+#         npm install --legacy-peer-deps 2>&1 | tee -a "$ROLLBACK_LOG_FILE"
+#         echo "🚀 Restarting previous version with PM2..." | tee -a "$ROLLBACK_LOG_FILE"
+
+#         # Check if PM2 is running and kill it
+#         pm2 kill 2>&1 | tee -a "$ROLLBACK_LOG_FILE" || true
+#         pm2 start "npm run start" --name "hiretrack-$VERSION_TO_RESTORE" --cwd "$APP_INSTALL_DIR" 2>&1 | tee -a "$ROLLBACK_LOG_FILE" || true
+#     else
+#         echo "⚠️ Backup not found. Killing PM2 processes..." | tee -a "$ROLLBACK_LOG_FILE"
+#         pm2 kill 2>&1 | tee -a "$ROLLBACK_LOG_FILE" || true
+#     fi
+
+#     echo "✅ Rollback completed." | tee -a "$ROLLBACK_LOG_FILE"
+#     write_config "installedVersion" "$VERSION_TO_RESTORE"
+# }
+
 rollback() {
     local VERSION_TO_RESTORE="${1:-}"   # default to empty string if not passed
 
@@ -535,26 +575,41 @@ rollback() {
 
     echo "🔄 Rolling back to version $VERSION_TO_RESTORE..." | tee -a "$ROLLBACK_LOG_FILE"
 
-    # Remove current install directory
-    # rm -rf "$APP_INSTALL_DIR" 2>&1 | tee -a "$ROLLBACK_LOG_FILE"
+    # Remove current install directory (only if exists)
     if [ -d "$APP_INSTALL_DIR" ]; then
-    sudo rm -rf --no-preserve-root "$APP_INSTALL_DIR" 2>&1 | tee -a "$ROLLBACK_LOG_FILE" || true
+        sudo rm -rf --no-preserve-root "$APP_INSTALL_DIR" 2>&1 | tee -a "$ROLLBACK_LOG_FILE" || true
     fi
 
+    # Restore from backup if found
     if [ -f "$BACKUP_FILE" ]; then
         mkdir -p "$APP_INSTALL_DIR" 2>&1 | tee -a "$ROLLBACK_LOG_FILE"
         tar -xf "$BACKUP_FILE" -C "$APP_INSTALL_DIR" 2>&1 | tee -a "$ROLLBACK_LOG_FILE"
         cd "$APP_INSTALL_DIR" || exit
         echo "📦 Restoring dependencies..." | tee -a "$ROLLBACK_LOG_FILE"
         npm install --legacy-peer-deps 2>&1 | tee -a "$ROLLBACK_LOG_FILE"
+
         echo "🚀 Restarting previous version with PM2..." | tee -a "$ROLLBACK_LOG_FILE"
 
-        # Check if PM2 is running and kill it
-        pm2 kill 2>&1 | tee -a "$ROLLBACK_LOG_FILE" || true
+        # Kill only hiretrack-* processes, not all
+        echo "🧹 Cleaning up old hiretrack PM2 processes..." | tee -a "$ROLLBACK_LOG_FILE"
+        pm2 list | awk '/hiretrack-/ {print $4}' | while read -r PROC; do
+            if [ -n "$PROC" ]; then
+                echo "🛑 Stopping $PROC..." | tee -a "$ROLLBACK_LOG_FILE"
+                pm2 delete "$PROC" 2>&1 | tee -a "$ROLLBACK_LOG_FILE" || true
+            fi
+        done
+
+        # Start the restored version
         pm2 start "npm run start" --name "hiretrack-$VERSION_TO_RESTORE" --cwd "$APP_INSTALL_DIR" 2>&1 | tee -a "$ROLLBACK_LOG_FILE" || true
+
     else
-        echo "⚠️ Backup not found. Killing PM2 processes..." | tee -a "$ROLLBACK_LOG_FILE"
-        pm2 kill 2>&1 | tee -a "$ROLLBACK_LOG_FILE" || true
+        echo "⚠️ Backup not found. Killing only hiretrack-* PM2 processes..." | tee -a "$ROLLBACK_LOG_FILE"
+        pm2 list | awk '/hiretrack-/ {print $4}' | while read -r PROC; do
+            if [ -n "$PROC" ]; then
+                echo "🛑 Stopping $PROC..." | tee -a "$ROLLBACK_LOG_FILE"
+                pm2 delete "$PROC" 2>&1 | tee -a "$ROLLBACK_LOG_FILE" || true
+            fi
+        done
     fi
 
     echo "✅ Rollback completed." | tee -a "$ROLLBACK_LOG_FILE"
@@ -564,288 +619,7 @@ rollback() {
 # -------------------------------
 # Main update & install function
 # -------------------------------
-# check_update_and_install() {
-#     create_default_config
-#     local FLAG1="${1:-}"
-#     local AUTO_UPDATE=$(jq -r '.autoUpdate' "$CONFIG_PATH")
-#     local INSTALLED_VERSION=$(jq -r '.installedVersion // "none"' "$CONFIG_PATH")
-   
-#     # 🔹 Manual update check
-#     if [ "$FLAG1" = "manually" ]; then
-#         echo "⚡ Manual update triggered. Skipping auto-update check..."
-#     else
-#         if [ "$AUTO_UPDATE" != "true" ]; then
-#             echo "✅ Auto-update disabled in config. Keeping version: $INSTALLED_VERSION"
-#             return
-#         fi
-#     fi
 
-#     local LATEST_VERSION=$(check_latest_version)
-#     local NORMALIZED_INSTALLED=$(echo "${INSTALLED_VERSION#v}" | tr -d '[:space:]')
-#     local NORMALIZED_LATEST=$(echo "${LATEST_VERSION#v}" | tr -d '[:space:]')
-
-#     echo "🔍 INSTALLED_VERSION='$INSTALLED_VERSION', LATEST_VERSION='$LATEST_VERSION'"
-
-#     if [ "$INSTALLED_VERSION" != "none" ] && [ "$NORMALIZED_INSTALLED" = "$NORMALIZED_LATEST" ]; then
-#         echo "✅ Already up to date! Installed version: $INSTALLED_VERSION"
-#         exit 0
-#     fi
-
-#     local ASSET_URL=$(validate_license_and_get_asset "$LATEST_VERSION")
-#     if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" = "null" ]; then
-#         echo "❌ Failed to get asset URL."
-#         exit 1
-#     fi
-
-#     local TMP_FILE="$HOME/.hiretrack/tmp_asset.tar.gz"
-#     curl -L "$ASSET_URL" -o "$TMP_FILE" || { echo "❌ Download failed."; exit 1; }
-
-#     local FILENAME=$(basename "$ASSET_URL")
-#     local VERSION_NAME="${FILENAME%.tar.gz}"
-#     VERSION_NAME=${VERSION_NAME#hiretrack-}
-
-#     # --- BACKUP HANDLING (exclude node_modules) ---
-#     local BACKUP_FILE="$BACKUP_DIR/backup-$INSTALLED_VERSION.tar"
-#     mkdir -p "$BACKUP_DIR"
-#     if [ "$INSTALLED_VERSION" != "none" ] && [ -d "$APP_INSTALL_DIR/node_modules" ]; then
-#         echo "📦 Backing up current version excluding node_modules..."
-#         rm -f "$BACKUP_DIR"/backup-*.tar 2>/dev/null
-#         (cd "$APP_INSTALL_DIR" && tar --exclude='node_modules' -cf "$BACKUP_FILE" .)
-#         echo "✅ Backup saved at: $BACKUP_FILE"
-#     else
-#         echo "⚠️ No valid installation found to backup."
-#     fi
-
-#     # --- INSTALLATION PROCESS ---
-#     rm -rf "$APP_INSTALL_DIR"
-#     mkdir -p "$APP_INSTALL_DIR"
-#     tar -xzf "$TMP_FILE" -C "$APP_INSTALL_DIR" || { rollback "$INSTALLED_VERSION"; exit 1; }
-#     rm "$TMP_FILE"
-
-#     local DB_URL=$(jq -r '.dbUrl // empty' "$CONFIG_PATH")
-#     [ -n "$DB_URL" ] && write_env_mongo_url "$APP_INSTALL_DIR" "$DB_URL"
-
-#     [ ! -f "$APP_INSTALL_DIR/package.json" ] && { rollback "$INSTALLED_VERSION"; exit 1; }
-
-#     install_node "$APP_INSTALL_DIR"
-
-#     local DB_CHOICE=$(jq -r '.dbChoice // empty' "$CONFIG_PATH")
-#     if [ "$DB_CHOICE" == "local" ]; then
-#         install_and_start_mongodb
-#     elif [ "$DB_CHOICE" != "atlas" ]; then
-#         echo "❌ Invalid dbChoice."; exit 1
-#     fi
-
-
-
-
-
-
-#     cd "$APP_INSTALL_DIR" || exit
-#     npm install --legacy-peer-deps || { rollback "$INSTALLED_VERSION"; exit 1; }
-#     pm2 kill || true
-#     # pm2 stop "hiretrack-$VERSION_NAME" 2>/dev/null || true
-#     # pm2 delete "hiretrack-$VERSION_NAME" 2>/dev/null || true
-#     pm2 start "npm run start" --name "hiretrack-$VERSION_NAME" --cwd "$APP_INSTALL_DIR" || { rollback "$INSTALLED_VERSION"; exit 1; }
-
-#     sleep 5
-#     pm2 describe "hiretrack-$VERSION_NAME" >/dev/null 2>&1 || { rollback "$INSTALLED_VERSION"; exit 1; }
-
-#     echo "✅ New version $VERSION_NAME started successfully."
-#     write_config "installedVersion" "$VERSION_NAME"
-
-#     # # --- Clean old PM2 processes ---
-#     # mapfile -t old_processes < <(pm2 jlist | jq -r '.[] | select(.name | startswith("hiretrack-")) | .name' | grep -v "hiretrack-$VERSION_NAME")
-#     # for proc in "${old_processes[@]}"; do
-#     #     [ -n "$proc" ] && { pm2 stop "$proc" || true;  pm2 delete "$proc" || true; }
-#     # done
-
-#     pm2 save --force
-
-#     # migration call
-#     if [ "$NORMALIZED_INSTALLED" != "none" ]; then
-#         run_migrations "$NORMALIZED_INSTALLED" "$NORMALIZED_LATEST"
-#     fi
-#     echo "✅ Installed/Updated to $VERSION_NAME at $APP_INSTALL_DIR. Backup retained (node_modules excluded)."
-# }
-
-
-
-# check_update_and_install() {
-#     create_default_config
-#     local FLAG1="${1:-}"
-#     local AUTO_UPDATE=$(jq -r '.autoUpdate' "$CONFIG_PATH")
-#     local INSTALLED_VERSION=$(jq -r '.installedVersion // "none"' "$CONFIG_PATH")
-#     local LOG_TO_FILE="false"
-#     local TIMESTAMP
-#     TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
-
-#     # Enable logging only for manual updates
-#     if [ "$FLAG1" = "manually" ]; then
-#         LOG_TO_FILE="true"
-#         echo "[$TIMESTAMP] ⚡ Manual update triggered. Starting update process..." | tee -a "$MANUAL_LOG_FILE"
-#     fi
-
-#     # Skip auto-update if disabled and not a manual update
-#     if [ "$AUTO_UPDATE" != "true" ] && [ "$LOG_TO_FILE" != "true" ]; then
-#         echo "✅ Auto-update disabled in config. Keeping version: $INSTALLED_VERSION"
-#         return 0
-#     fi
-
-#     local LATEST_VERSION
-#     LATEST_VERSION=$(check_latest_version) || LATEST_VERSION=""
-#     local NORMALIZED_INSTALLED
-#     NORMALIZED_INSTALLED=$(echo "${INSTALLED_VERSION#v}" | tr -d '[:space:]')
-#     local NORMALIZED_LATEST
-#     NORMALIZED_LATEST=$(echo "${LATEST_VERSION#v}" | tr -d '[:space:]')
-
-#     if [ "$LOG_TO_FILE" = "true" ]; then
-#         echo "[$TIMESTAMP] 🔍 Checking versions: Installed='$INSTALLED_VERSION', Latest='$LATEST_VERSION'" | tee -a "$MANUAL_LOG_FILE"
-#     else
-#         echo "🔍 Checking versions: Installed='$INSTALLED_VERSION', Latest='$LATEST_VERSION'"
-#     fi
-
-#     if [ -z "$LATEST_VERSION" ]; then
-#         echo "❌ Unable to determine latest version. Aborting."
-#         return 1
-#     fi
-
-#     if [ "$INSTALLED_VERSION" != "none" ] && [ "$NORMALIZED_INSTALLED" = "$NORMALIZED_LATEST" ]; then
-#         echo "✅ Already up to date with version: $INSTALLED_VERSION"
-#         return 0
-#     fi
-
-#     echo "🚀 Update available: Current=$INSTALLED_VERSION, Latest=$LATEST_VERSION"
-
-#     local ASSET_URL
-#     ASSET_URL=$(validate_license_and_get_asset "$LATEST_VERSION") || ASSET_URL=""
-#     if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" = "null" ]; then
-#         echo "❌ Failed to retrieve asset URL for version $LATEST_VERSION"
-#         return 1
-#     fi
-
-#     local TMP_FILE="$HOME/.hiretrack/tmp_asset.tar.gz"
-#     echo "📥 Downloading update from: $ASSET_URL to $TMP_FILE"
-#     curl -L "$ASSET_URL" -o "$TMP_FILE" || {
-#         echo "❌ Failed to download update"
-#         return 1
-#     }
-
-#     local FILENAME
-#     FILENAME=$(basename "$ASSET_URL")
-#     local VERSION_NAME
-#     VERSION_NAME="${FILENAME%.tar.gz}"
-#     VERSION_NAME=${VERSION_NAME#hiretrack-}
-
-#     local BACKUP_FILE="$BACKUP_DIR/backup-$INSTALLED_VERSION.tar"
-#     mkdir -p "$BACKUP_DIR"
-#     if [ "$INSTALLED_VERSION" != "none" ] && [ -d "$APP_INSTALL_DIR/node_modules" ]; then
-#         echo "📦 Creating backup of current version $INSTALLED_VERSION..."
-#         rm -f "$BACKUP_DIR"/backup-*.tar 2>/dev/null
-#         (cd "$APP_INSTALL_DIR" && tar --exclude='node_modules' -cf "$BACKUP_FILE" .)
-#         echo "✅ Backup saved at: $BACKUP_FILE"
-#     else
-#         echo "⚠️ No valid installation found to backup"
-#     fi
-
-#     rm -rf "$APP_INSTALL_DIR"
-#     mkdir -p "$APP_INSTALL_DIR"
-#     if ! tar -xzf "$TMP_FILE" -C "$APP_INSTALL_DIR"; then
-#         echo "❌ Failed to extract update. Rolling back..."
-#         rollback "$INSTALLED_VERSION"
-#         return 1
-#     fi
-#     rm -f "$TMP_FILE"
-
-#     local DB_URL
-#     DB_URL=$(jq -r '.dbUrl // empty' "$CONFIG_PATH")
-#     [ -n "$DB_URL" ] && write_env_mongo_url "$APP_INSTALL_DIR" "$DB_URL"
-
-#     if [ ! -f "$APP_INSTALL_DIR/package.json" ]; then
-#         echo "❌ package.json not found in $APP_INSTALL_DIR"
-#         rollback "$INSTALLED_VERSION"
-#         return 1
-#     fi
-
-#     install_node "$APP_INSTALL_DIR" || {
-#         echo "❌ install_node failed"
-#         rollback "$INSTALLED_VERSION"
-#         return 1
-#     }
-
-#     local DB_CHOICE
-#     DB_CHOICE=$(jq -r '.dbChoice // empty' "$CONFIG_PATH")
-#     if [ "$DB_CHOICE" = "local" ]; then
-#         install_and_start_mongodb || {
-#             echo "❌ install_and_start_mongodb failed"
-#             return 1
-#         }
-#     elif [ "$DB_CHOICE" != "atlas" ] && [ -n "$DB_CHOICE" ]; then
-#         echo "❌ Invalid database choice: $DB_CHOICE"
-#         return 1
-#     fi
-
-#     cd "$APP_INSTALL_DIR" || {
-#         echo "❌ Failed to cd into $APP_INSTALL_DIR"
-#         rollback "$INSTALLED_VERSION"
-#         return 1
-#     }
-
-#     if ! npm install --legacy-peer-deps; then
-#         echo "❌ npm install failed. Rolling back..."
-#         rollback "$INSTALLED_VERSION"
-#         return 1
-#     fi
-
-#     # ✅ Use original PM2 start command (without --prefix)
-#     pm2 stop "hiretrack-$VERSION_NAME" 2>/dev/null || true
-#     pm2 delete "hiretrack-$VERSION_NAME" 2>/dev/null || true
-#     # pm2 kill || true
-#     if ! pm2 start "npm run start" --name "hiretrack-$VERSION_NAME" --cwd "$APP_INSTALL_DIR"; then
-#         echo "❌ Failed to start application. Rolling back..."
-#         rollback "$INSTALLED_VERSION"
-#         return 1
-#     fi
-
-#     sleep 5
-#     if ! pm2 describe "hiretrack-$VERSION_NAME" >/dev/null 2>&1; then
-#         echo "❌ Application failed to start (PM2 describe failed). Rolling back..."
-#         rollback "$INSTALLED_VERSION"
-#         return 1
-#     fi
-
-#     echo "✅ Successfully started version $VERSION_NAME"
-#     write_config "installedVersion" "$VERSION_NAME"
-
-#      # 🔪 Kill all old hiretrack processes before starting the new one
-#     echo "🧹 Cleaning up old PM2 processes..."
-#     mapfile -t old_processes < <(pm2 jlist 2>/dev/null | jq -r '.[] | select(.name | test("^hiretrack-")) | .name' || true)
-
-#     for proc in "${old_processes[@]:-}"; do
-#         echo "⏹ Stopping and deleting process: $proc"
-#         # pm2 stop "$proc" || true
-#         # sleep 1
-#         # pm2 delete "$proc" || true
-#         pm2 kill "$proc" || true
-#     done
-
-
-
-
-#     pm2 save --force
-
-#     if [ "$NORMALIZED_INSTALLED" != "none" ]; then
-#         echo "📦 Running migrations from $NORMALIZED_INSTALLED to $NORMALIZED_LATEST..."
-#         run_migrations "$NORMALIZED_INSTALLED" "$NORMALIZED_LATEST" || {
-#             echo "❌ Migrations failed. Rolling back..."
-#             rollback "$INSTALLED_VERSION"
-#             return 1
-#         }
-#     fi
-
-#     echo "✅ Successfully installed/updated to $VERSION_NAME at $APP_INSTALL_DIR"
-#     return 0
-# }
 check_update_and_install() {
     create_default_config
     local FLAG1="${1:-}"
@@ -1091,6 +865,207 @@ run_migrations() {
     done
 
     echo "✅ All available migrations processed (failures skipped safely)." | tee -a "$LOG_DIR/migration.log"
+}
+
+
+
+create_snapshot_script() {
+    local HIRETRACK_DIR="$HOME/.hiretrack"
+    local SNAPSHOT_FILE="$HIRETRACK_DIR/take-snapshot.js"
+
+    echo "🧩 Creating take-snapshot.js in $HIRETRACK_DIR ..."
+
+    # Ensure the .hiretrack directory exists
+    mkdir -p "$HIRETRACK_DIR"
+
+    # Write the JS backup script
+    cat > "$SNAPSHOT_FILE" <<'EOF'
+// take-snapshot.js
+const { exec } = require('child_process');
+const path = require('path');
+const fs = require('fs');
+
+// ---------------------------------------------
+// 📦 MongoDB Backup Script
+// ---------------------------------------------
+
+const configPath = path.join(__dirname, 'config.json');
+if (!fs.existsSync(configPath)) {
+  console.error('❌ config.json not found.');
+  process.exit(1);
+}
+
+const config = require(configPath);
+const { dbUrl } = config;
+
+// Validate DB URL
+if (!dbUrl) {
+  console.error('❌ Database URL (dbUrl) missing in config.json.');
+  process.exit(1);
+}
+
+const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+const dumpDir = path.join('/tmp', \`mongo-dump-\${timestamp}\`);
+const backupDir = path.join(__dirname, 'backups');
+const tarFile = path.join(backupDir, \`backup-\${timestamp}.tar.gz\`);
+
+// Ensure backup directory exists
+fs.mkdirSync(backupDir, { recursive: true });
+
+// Build commands
+const dumpCmd = \`mongodump --uri="\${dbUrl}" --out="\${dumpDir}"\`;
+const compressCmd = \`tar -czf "\${tarFile}" -C "\${dumpDir}" .\`;
+const cleanupCmd = \`rm -rf "\${dumpDir}"\`;
+
+// Log info
+console.log('🧩 Starting MongoDB backup...');
+console.log(\`🔗 DB URL: \${dbUrl}\`);
+console.log(\`📁 Backup Path: \${tarFile}\`);
+console.log('----------------------------------');
+
+// Run backup
+exec(\`\${dumpCmd} && \${compressCmd} && \${cleanupCmd}\`, (error, stdout, stderr) => {
+  if (error) {
+    console.error(\`❌ Backup failed: \${error.message}\`);
+    return;
+  }
+  if (stderr && !stderr.includes('warning')) {
+    console.error(\`⚠ stderr: \${stderr}\`);
+  }
+  console.log(\`✅ Backup successful! Archive created at: \${tarFile}\`);
+});
+EOF
+
+    # Make it executable
+    chmod +x "$SNAPSHOT_FILE"
+    echo "✅ take-snapshot.js created and made executable."
+}
+
+
+
+# --------------------------------------------------
+# 🧩 Auto-create backup.sh script in same directory
+# --------------------------------------------------
+create_backup_script() {
+    INSTALLER_DIR="$(dirname "$(readlink -f "$0")")"
+    BACKUP_PATH="$INSTALLER_DIR/backup.sh"
+
+    cat > "$BACKUP_PATH" <<'EOF'
+#!/bin/bash
+set -e
+
+# ---------------------------------------------
+# 📦 Backup Script for .hiretrack (Exclude node_modules)
+# Auto-generated by installer.sh
+# ---------------------------------------------
+
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+MYAPP_DIR="$SCRIPT_DIR"
+BACKUP_DIR="$ROOT_DIR/hiretrack-backup"
+BACKUP_FILE="$BACKUP_DIR/hiretrack_backup.tar.gz"
+
+log() {
+    echo "[ $(date +"%Y-%m-%d %H:%M:%S") ] $1"
+}
+
+install_mongodump() {
+    log "⚙️  Installing MongoDB Database Tools (includes mon    godump)..."
+
+    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -y
+            apt-get install -y mongodb-database-tools
+        elif command -v yum >/dev/null 2>&1; then
+            yum install -y mongodb-database-tools
+        else
+            log "❌ Unsupported Linux package manager. Please install mongodump manually."
+            exit 1
+        fi
+    elif [[ "$OSTYPE" == "darwin"* ]]; then
+        if command -v brew >/dev/null 2>&1; then
+            brew tap mongodb/brew
+            brew install mongodb-database-tools
+        else
+            log "❌ Homebrew not found. Please install Homebrew or install mongodump manually."
+            exit 1
+        fi
+    else
+        log "❌ Unsupported OS. Please install mongodump manually."
+        exit 1
+    fi
+
+    if ! command -v mongodump >/dev/null 2>&1; then
+        log "❌ Installation failed — mongodump still not found."
+        exit 1
+    fi
+
+    log "✅ mongodump installed successfully!"
+}
+
+# ---------------------------------------------
+# 🧩 Pre-checks
+# ---------------------------------------------
+if [ ! -d "$MYAPP_DIR" ]; then
+    log "❌ .hiretrack directory not found at $MYAPP_DIR"
+    exit 1
+fi
+
+if ! command -v mongodump >/dev/null 2>&1; then
+    log "⚠️  mongodump not found. Attempting to install..."
+    install_mongodump
+else
+    if mongodump --version >/dev/null 2>&1; then
+        log "✅ mongodump found: $(mongodump --version | head -n 1)"
+    else
+        log "✅ mongodump found"
+    fi
+fi
+
+# ---------------------------------------------
+# 🚀 Backup process
+# ---------------------------------------------
+log "🚀 Starting backup process..."
+mkdir -p "$BACKUP_DIR"
+
+SNAPSHOT_FILE="$MYAPP_DIR/take-snapshot.js"
+log "🔎 Checking for take-snapshot.js in $MYAPP_DIR..."
+if [ ! -f "$SNAPSHOT_FILE" ]; then
+    log "❌ take-snapshot.js not found in $MYAPP_DIR"
+    exit 1
+fi
+
+pushd "$MYAPP_DIR" > /dev/null
+log "▶️ Running snapshot script..."
+if ! command -v node >/dev/null 2>&1; then
+    log "❌ node runtime not found in PATH"
+    popd > /dev/null || true
+    exit 1
+fi
+
+if ! node take-snapshot.js; then
+    log "❌ take-snapshot.js failed"
+    popd > /dev/null || true
+    exit 1
+fi
+popd > /dev/null
+log "✅ Snapshot script completed successfully"
+
+if [ -f "$BACKUP_FILE" ]; then
+    log "🗑️ Removing old backup file..."
+    rm -f "$BACKUP_FILE"
+fi
+
+log "📦 Creating backup (excluding node_modules)..."
+tar --exclude='*/node_modules' -czf "$BACKUP_FILE" -C "$ROOT_DIR" ".hiretrack"
+
+log "✅ Backup created successfully!"
+log "📁 Backup file: $BACKUP_FILE"
+log "🎉 Done!"
+EOF
+
+    chmod +x "$BACKUP_PATH"
+    echo "[✔️] Backup script created at: $BACKUP_PATH"
 }
 
 
@@ -2057,7 +2032,7 @@ restart_pm2_service() {
         echo "🔄 Restarting all matching PM2 processes..."
 
         echo "$MATCHING_PROCS" | while read -r PROC; do
-            [ -n "$PROC" ] && pm2 restart "$PROC" || echo "⚠️ Failed to restart $PROC"
+            [ -n "$PROC" ] && pm2 restart "$PROC" --update-env || echo "⚠️ Failed to restart $PROC"
         done
     else
         echo "⚠️  No hiretrack-* process found. Starting ecosystem..."
@@ -2083,25 +2058,66 @@ restart_pm2_service() {
     fi
 }
 
+# # ------------------------------------------------
+# # Cron Setup
+# # ------------------------------------------------
+# setup_cron() {
+#     local OS_TYPE=$(uname | tr '[:upper:]' '[:lower:]')
+#     local CRON_NAME="hiretrack-autoupdate"
+#     local CRON_ENTRY="*/2 * * * * PATH=/usr/local/bin:/usr/bin:/bin bash $SCRIPT_PATH --update >> $CRON_LOG_FILE 2>&1"
+
+#     if [[ "$OS_TYPE" == "linux" || "$OS_TYPE" == "darwin" ]]; then
+#         local CURRENT_CRON=$(crontab -l 2>/dev/null || echo "")
+
+#         # Check if the exact cron command already exists
+#         if ! echo "$CURRENT_CRON" | grep -Fq "$CRON_ENTRY"; then
+#             # Append comment and cron command
+#             (echo "$CURRENT_CRON"; echo "# CRON_NAME:$CRON_NAME"; echo "$CRON_ENTRY") | crontab -
+#             echo "✅ Cron job '$CRON_NAME' added. Logs: $CRON_LOG_FILE"
+#         else
+#             echo "✅ Cron job '$CRON_NAME' already exists. Logs: $CRON_LOG_FILE"
+#         fi
+#     else
+#         echo "❌ Unsupported OS: $OS_TYPE. Cannot setup cron."
+#     fi
+# }
 # ------------------------------------------------
 # Cron Setup
 # ------------------------------------------------
 setup_cron() {
     local OS_TYPE=$(uname | tr '[:upper:]' '[:lower:]')
     local CRON_NAME="hiretrack-autoupdate"
+    local SNAPSHOT_CRON_NAME="hiretrack-snapshot"
     local CRON_ENTRY="*/2 * * * * PATH=/usr/local/bin:/usr/bin:/bin bash $SCRIPT_PATH --update >> $CRON_LOG_FILE 2>&1"
+    local SNAPSHOT_CRON_ENTRY="0 2 * * * PATH=/usr/local/bin:/usr/bin:/bin node $SNAPSHOT_SCRIPT >> $SNAPSHOT_LOG_FILE 2>&1"
 
     if [[ "$OS_TYPE" == "linux" || "$OS_TYPE" == "darwin" ]]; then
         local CURRENT_CRON=$(crontab -l 2>/dev/null || echo "")
 
-        # Check if the exact cron command already exists
+        # ------------------------------------------------
+        # 🧩 Auto-update Cron (every 2 minutes)
+        # ------------------------------------------------
         if ! echo "$CURRENT_CRON" | grep -Fq "$CRON_ENTRY"; then
-            # Append comment and cron command
             (echo "$CURRENT_CRON"; echo "# CRON_NAME:$CRON_NAME"; echo "$CRON_ENTRY") | crontab -
             echo "✅ Cron job '$CRON_NAME' added. Logs: $CRON_LOG_FILE"
         else
             echo "✅ Cron job '$CRON_NAME' already exists. Logs: $CRON_LOG_FILE"
         fi
+
+        # ------------------------------------------------
+        # 🧩 Snapshot Cron (every 24 hours)
+        # ------------------------------------------------
+        if [ -f "$SNAPSHOT_SCRIPT" ]; then
+            if ! echo "$CURRENT_CRON" | grep -Fq "$SNAPSHOT_CRON_ENTRY"; then
+                (echo "$CURRENT_CRON"; echo "# CRON_NAME:$SNAPSHOT_CRON_NAME"; echo "$SNAPSHOT_CRON_ENTRY") | crontab -
+                echo "✅ Cron job '$SNAPSHOT_CRON_NAME' added. Logs: $SNAPSHOT_LOG_FILE"
+            else
+                echo "✅ Cron job '$SNAPSHOT_CRON_NAME' already exists. Logs: $SNAPSHOT_LOG_FILE"
+            fi
+        else
+            echo "⚠️ Snapshot script not found at $SNAPSHOT_SCRIPT. Skipping snapshot cron setup."
+        fi
+
     else
         echo "❌ Unsupported OS: $OS_TYPE. Cannot setup cron."
     fi
@@ -2117,12 +2133,13 @@ install_all() {
 
     create_default_config "$EMAIL"
     [ ! -f "$LICENSE_PATH" ] && register_license "$EMAIL"
+    create_backup_script
+    create_snapshot_script
     check_update_and_install
     setup_cron
     setup_nginx
     write_env_server_details
     restart_pm2_service
-
     echo "==== Installation complete! ===="
     exit 0
 }
@@ -2181,7 +2198,7 @@ case "${1:-}" in
         echo "Commands:"
         echo "  --install [email]             Install the application (optionally register with email)"
         echo "  --update [mode]               Check for and install updates"
-        echo "                                Example: $0 --update manual"
+        echo "                                Example: $0 --update manually"
         echo "  --run-migrations [from] [to]  Run database migrations between versions"
         echo "                                Example: $0 --run-migrations 2.2.25 2.2.26"
         echo "  --rollback [version]          Roll back to a specific or previous version"

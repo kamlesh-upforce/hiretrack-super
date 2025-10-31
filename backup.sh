@@ -8,7 +8,7 @@ set -e
 ROOT_DIR="$PWD"
 MYAPP_DIR="$ROOT_DIR/.hiretrack"
 BACKUP_DIR="$ROOT_DIR/hiretrack-backup"
-BACKUP_FILE="$BACKUP_DIR/myapp_backup.tar.gz"
+BACKUP_FILE="$BACKUP_DIR/hiretrack_backup.tar.gz"
 
 log() {
     echo "[ $(date +"%Y-%m-%d %H:%M:%S") ] $1"

@@ -64,20 +64,24 @@ fi
 # ------------------------------------------------
 if command -v pm2 >/dev/null 2>&1; then
     echo "🧩 Checking PM2 processes..."
-    PM2_LIST=$(pm2 list | grep -E "$PM2_APP_PATTERN" || true)
+    PM2_MATCHING_APPS=$(pm2 list | awk '/hiretrack-/ {print $2}' || true)
 
-    if [ -n "$PM2_LIST" ]; then
-        echo "⏹ Stopping active PM2 apps related to '$PM2_APP_PATTERN'..."
-        pm2 stop all >/dev/null 2>&1 || true
-        pm2 delete all >/dev/null 2>&1 || true
+    if [ -n "$PM2_MATCHING_APPS" ]; then
+        echo "⏹ Stopping and deleting PM2 apps starting with 'hiretrack-'..."
+        for app in $PM2_MATCHING_APPS; do
+            echo "   → Removing $app ..."
+            pm2 stop "$app" >/dev/null 2>&1 || true
+            pm2 delete "$app" >/dev/null 2>&1 || true
+        done
         pm2 save >/dev/null 2>&1 || true
-        echo "✅ All matching PM2 apps stopped and removed."
+        echo "✅ All 'hiretrack-*' PM2 apps stopped and removed."
     else
-        echo "✅ No matching PM2 processes found."
+        echo "✅ No 'hiretrack-*' PM2 processes found."
     fi
 else
     echo "⚠️ PM2 not installed, skipping process cleanup."
 fi
+
 
 echo "--------------------------------------------------"
 echo "✨ Cleanup completed successfully!"
