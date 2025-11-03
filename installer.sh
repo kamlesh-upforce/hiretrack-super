@@ -17,10 +17,10 @@ SNAPSHOT_LOG_FILE="$LOG_DIR/snapshot.log"
 MANUAL_LOG_FILE="$LOG_DIR/manual_update.log"
 ROLLBACK_LOG_FILE="$LOG_DIR/rollback.log"
 
-API_URL="https://hiretrack-super-bunny.vercel.app/api/license/register"
-API_URL_UPDATE_LIC="https://hiretrack-super-bunny.vercel.app/api/license/update"
-VALIDATE_API="https://hiretrack-super-bunny.vercel.app/api/license/validate"
-LATEST_VERSION_API="https://hiretrack-super-bunny.vercel.app/api/version/list"
+API_URL="https://admin.hiretrack.in/api/license/register"
+API_URL_UPDATE_LIC="https://admin.hiretrack.in/api/license/update"
+VALIDATE_API="https://admin.hiretrack.in/api/license/validate"
+LATEST_VERSION_API="https://admin.hiretrack.in/api/version/list"
 
 MONGODB_VERSION="${MONGODB_VERSION:-7.0}"
 NODE_VERSION_DEFAULT=20
@@ -898,41 +898,36 @@ if (!fs.existsSync(configPath)) {
 const config = require(configPath);
 const { dbUrl } = config;
 
-// Validate DB URL
 if (!dbUrl) {
   console.error('❌ Database URL (dbUrl) missing in config.json.');
   process.exit(1);
 }
 
 const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-const dumpDir = path.join('/tmp', \`mongo-dump-\${timestamp}\`);
+const dumpDir = path.join('/tmp', `mongo-dump-${timestamp}`);
 const backupDir = path.join(__dirname, 'backups');
-const tarFile = path.join(backupDir, \`backup-\${timestamp}.tar.gz\`);
+const tarFile = path.join(backupDir, `backup-${timestamp}.tar.gz`);
 
-// Ensure backup directory exists
 fs.mkdirSync(backupDir, { recursive: true });
 
-// Build commands
-const dumpCmd = \`mongodump --uri="\${dbUrl}" --out="\${dumpDir}"\`;
-const compressCmd = \`tar -czf "\${tarFile}" -C "\${dumpDir}" .\`;
-const cleanupCmd = \`rm -rf "\${dumpDir}"\`;
+const dumpCmd = `mongodump --uri="${dbUrl}" --out="${dumpDir}"`;
+const compressCmd = `tar -czf "${tarFile}" -C "${dumpDir}" .`;
+const cleanupCmd = `rm -rf "${dumpDir}"`;
 
-// Log info
 console.log('🧩 Starting MongoDB backup...');
-console.log(\`🔗 DB URL: \${dbUrl}\`);
-console.log(\`📁 Backup Path: \${tarFile}\`);
+console.log(`🔗 DB URL: ${dbUrl}`);
+console.log(`📁 Backup Path: ${tarFile}`);
 console.log('----------------------------------');
 
-// Run backup
-exec(\`\${dumpCmd} && \${compressCmd} && \${cleanupCmd}\`, (error, stdout, stderr) => {
+exec(`${dumpCmd} && ${compressCmd} && ${cleanupCmd}`, (error, stdout, stderr) => {
   if (error) {
-    console.error(\`❌ Backup failed: \${error.message}\`);
+    console.error(`❌ Backup failed: ${error.message}`);
     return;
   }
   if (stderr && !stderr.includes('warning')) {
-    console.error(\`⚠ stderr: \${stderr}\`);
+    console.error(`⚠ stderr: ${stderr}`);
   }
-  console.log(\`✅ Backup successful! Archive created at: \${tarFile}\`);
+  console.log(`✅ Backup successful! Archive created at: ${tarFile}`);
 });
 EOF
 
@@ -2088,7 +2083,7 @@ setup_cron() {
     local OS_TYPE=$(uname | tr '[:upper:]' '[:lower:]')
     local CRON_NAME="hiretrack-autoupdate"
     local SNAPSHOT_CRON_NAME="hiretrack-snapshot"
-    local CRON_ENTRY="*/2 * * * * PATH=/usr/local/bin:/usr/bin:/bin bash $SCRIPT_PATH --update >> $CRON_LOG_FILE 2>&1"
+    local CRON_ENTRY="0 2 * * * PATH=/usr/local/bin:/usr/bin:/bin bash $SCRIPT_PATH --update >> $CRON_LOG_FILE 2>&1"
     local SNAPSHOT_CRON_ENTRY="0 2 * * * PATH=/usr/local/bin:/usr/bin:/bin node $SNAPSHOT_SCRIPT >> $SNAPSHOT_LOG_FILE 2>&1"
 
     if [[ "$OS_TYPE" == "linux" || "$OS_TYPE" == "darwin" ]]; then
