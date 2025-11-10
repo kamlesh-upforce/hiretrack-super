@@ -181,6 +181,9 @@ install_node() {
     local NODE_MAJOR_VERSION
     NODE_MAJOR_VERSION=$(echo "$NODE_VERSION" | sed 's/v\([0-9]*\).*/\1/')
 
+    local NEEDS_INSTALL=false
+    local NEEDS_REMOVE=false
+
     if command -v node >/dev/null 2>&1; then
         local CURRENT_VERSION
         CURRENT_VERSION=$(node -v | sed 's/v\([0-9]*\).*/\1/')
@@ -189,52 +192,84 @@ install_node() {
             return
         else
             echo "⚠ Node.js version $CURRENT_VERSION found, but version $NODE_MAJOR_VERSION.x required."
+            NEEDS_REMOVE=true
+            NEEDS_INSTALL=true
         fi
     else
         echo "⚠ Node.js not found."
+        NEEDS_INSTALL=true
     fi
 
-    echo "📦 Installing Node.js version $NODE_MAJOR_VERSION globally..."
-    local OS_TYPE
-    OS_TYPE=$(uname | tr '[:upper:]' '[:lower:]')
-    local CODENAME
-
-    if [[ "$OS_TYPE" == "linux" ]]; then
-        if command -v apt-get >/dev/null 2>&1; then
-            CODENAME=$(lsb_release -cs 2>/dev/null || echo "focal")
-            curl -fsSL "https://deb.nodesource.com/setup_$NODE_MAJOR_VERSION.x" | sudo -E bash -
-            sudo apt-get install -y nodejs
-        elif command -v yum >/dev/null 2>&1; then
-            curl -fsSL "https://rpm.nodesource.com/setup_$NODE_MAJOR_VERSION.x" | sudo -E bash -
-            sudo yum install -y nodejs
-        else
-            echo "❌ Unsupported Linux package manager. Install Node.js manually."
-            exit 1
+    # Remove existing Node.js if different version is installed
+    if [ "$NEEDS_REMOVE" = "true" ]; then
+        echo "🗑️ Removing existing Node.js installation..."
+        local OS_TYPE
+        OS_TYPE=$(uname | tr '[:upper:]' '[:lower:]')
+        
+        if [[ "$OS_TYPE" == "linux" ]]; then
+            if command -v apt-get >/dev/null 2>&1; then
+                sudo apt-get remove -y nodejs npm 2>/dev/null || true
+                sudo apt-get purge -y nodejs npm 2>/dev/null || true
+                # Remove NodeSource repository files
+                sudo rm -f /etc/apt/sources.list.d/nodesource*.list 2>/dev/null || true
+                sudo rm -f /usr/share/keyrings/nodesource.gpg 2>/dev/null || true
+                sudo apt-get update 2>/dev/null || true
+            elif command -v yum >/dev/null 2>&1; then
+                sudo yum remove -y nodejs npm 2>/dev/null || true
+                sudo rm -f /etc/yum.repos.d/nodesource*.repo 2>/dev/null || true
+            fi
+        elif [[ "$OS_TYPE" == "darwin" ]]; then
+            if command -v brew >/dev/null 2>&1; then
+                brew uninstall --ignore-dependencies node 2>/dev/null || true
+                brew uninstall --ignore-dependencies node@* 2>/dev/null || true
+            fi
         fi
-    elif [[ "$OS_TYPE" == "darwin" ]]; then
-        if ! command -v brew >/dev/null 2>&1; then
-            echo "❌ Homebrew not found. Install Homebrew first."
-            exit 1
-        fi
-        brew install node@$NODE_MAJOR_VERSION
-        brew link node@$NODE_MAJOR_VERSION --force
-    else
-        echo "❌ Unsupported OS: $OS_TYPE"
-        exit 1
+        echo "✅ Existing Node.js removed."
     fi
 
-    if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
-        local INSTALLED_VERSION
-        INSTALLED_VERSION=$(node -v | sed 's/v\([0-9]*\).*/\1/')
-        if [ "$INSTALLED_VERSION" = "$NODE_MAJOR_VERSION" ]; then
-            echo "✅ Node.js $NODE_MAJOR_VERSION and npm $(npm -v) installed successfully."
+    if [ "$NEEDS_INSTALL" = "true" ]; then
+        echo "📦 Installing Node.js version $NODE_MAJOR_VERSION globally..."
+        local OS_TYPE
+        OS_TYPE=$(uname | tr '[:upper:]' '[:lower:]')
+        local CODENAME
+
+        if [[ "$OS_TYPE" == "linux" ]]; then
+            if command -v apt-get >/dev/null 2>&1; then
+                CODENAME=$(lsb_release -cs 2>/dev/null || echo "focal")
+                curl -fsSL "https://deb.nodesource.com/setup_$NODE_MAJOR_VERSION.x" | sudo -E bash -
+                sudo apt-get install -y nodejs
+            elif command -v yum >/dev/null 2>&1; then
+                curl -fsSL "https://rpm.nodesource.com/setup_$NODE_MAJOR_VERSION.x" | sudo -E bash -
+                sudo yum install -y nodejs
+            else
+                echo "❌ Unsupported Linux package manager. Install Node.js manually."
+                exit 1
+            fi
+        elif [[ "$OS_TYPE" == "darwin" ]]; then
+            if ! command -v brew >/dev/null 2>&1; then
+                echo "❌ Homebrew not found. Install Homebrew first."
+                exit 1
+            fi
+            brew install node@$NODE_MAJOR_VERSION
+            brew link node@$NODE_MAJOR_VERSION --force --overwrite
         else
-            echo "❌ Failed to install Node.js $NODE_MAJOR_VERSION. Found version: $(node -v)."
+            echo "❌ Unsupported OS: $OS_TYPE"
             exit 1
         fi
-    else
-        echo "❌ Node.js installation failed."
-        exit 1
+
+        if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+            local INSTALLED_VERSION
+            INSTALLED_VERSION=$(node -v | sed 's/v\([0-9]*\).*/\1/')
+            if [ "$INSTALLED_VERSION" = "$NODE_MAJOR_VERSION" ]; then
+                echo "✅ Node.js $NODE_MAJOR_VERSION and npm $(npm -v) installed successfully."
+            else
+                echo "❌ Failed to install Node.js $NODE_MAJOR_VERSION. Found version: $(node -v)."
+                exit 1
+            fi
+        else
+            echo "❌ Node.js installation failed."
+            exit 1
+        fi
     fi
 }
 
