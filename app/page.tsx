@@ -2,6 +2,10 @@
 
 import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import FormInput from "./components/forms/FormInput";
+import ErrorMessage from "./components/ui/ErrorMessage";
+import LoadingSpinner from "./components/ui/LoadingSpinner";
+import ThemeToggle from "./components/ui/ThemeToggle";
 
 export default function Home() {
   const router = useRouter();
@@ -14,10 +18,7 @@ export default function Home() {
 
   // Check if user is already logged in
   useEffect(() => {
-    // Check if there's a token in localStorage
     const token = localStorage.getItem("authToken");
-
-    // If token exists, try to access dashboard
     if (token) {
       router.push("/dashboard");
     }
@@ -29,6 +30,7 @@ export default function Home() {
       ...formData,
       [name]: value,
     });
+    if (error) setError("");
   };
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
@@ -43,7 +45,7 @@ export default function Home() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify(formData),
-        credentials: "include", // Important: This tells fetch to include cookies
+        credentials: "include",
       });
 
       const data = await response.json();
@@ -52,12 +54,10 @@ export default function Home() {
         throw new Error(data.error || "Login failed");
       }
 
-      // Store token in localStorage as backup
       if (data.token) {
         localStorage.setItem("authToken", data.token);
       }
 
-      // Redirect to dashboard
       router.push("/dashboard");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
@@ -67,78 +67,61 @@ export default function Home() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50">
-      <div className="max-w-md w-full p-6 bg-white rounded-lg shadow-lg">
-        <h1 className="text-2xl font-bold text-center text-gray-800 mb-8">
-          License Administration
-        </h1>
-
-        {error && (
-          <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
-            {error}
+    <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 transition-colors px-4 py-8 relative">
+      <div className="absolute top-4 right-4">
+        <ThemeToggle variant="light" />
+      </div>
+      <div className="max-w-md w-full">
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg border border-gray-200 dark:border-gray-700 p-6 sm:p-8 transition-colors">
+          <div className="text-center mb-8">
+            <h1 className="text-3xl font-bold text-gray-900 dark:text-gray-100 mb-2">
+              License Administration
+            </h1>
+            <p className="text-gray-600 dark:text-gray-400 text-sm">
+              Sign in to manage your licenses
+            </p>
           </div>
-        )}
 
-        <form onSubmit={handleSubmit}>
-          <div className="mb-4">
-            <label
-              className="block text-gray-700 text-sm font-bold mb-2"
-              htmlFor="email"
-            >
-              Email
-            </label>
-            <input
-              type="email"
-              id="email"
+          {error && (
+            <div className="mb-6">
+              <ErrorMessage message={error} onDismiss={() => setError("")} />
+            </div>
+          )}
+
+          <form onSubmit={handleSubmit}>
+            <FormInput
+              label="Email Address"
               name="email"
+              type="email"
               value={formData.email}
               onChange={handleChange}
-              className="w-full px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-              placeholder="Enter your email"
               required
+              placeholder="Enter your email"
+              disabled={loading}
+              className="mb-4"
             />
-          </div>
 
-          <div className="mb-6">
-            <label
-              className="block text-gray-700 text-sm font-bold mb-2"
-              htmlFor="password"
-            >
-              Password
-            </label>
-            <input
-              type="password"
-              id="password"
+            <FormInput
+              label="Password"
               name="password"
+              type="password"
               value={formData.password}
               onChange={handleChange}
-              className="w-full px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-              placeholder="Enter your password"
               required
+              placeholder="Enter your password"
+              disabled={loading}
+              className="mb-6"
             />
-          </div>
 
-          <div className="flex items-center justify-between">
             <button
               type="submit"
               disabled={loading}
-              className="w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline"
+              className="w-full bg-blue-600 dark:bg-blue-700 text-white font-semibold py-3 px-4 rounded-md hover:bg-blue-700 dark:hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:focus:ring-offset-gray-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center space-x-2"
             >
-              {loading ? "Signing in..." : "Sign In"}
+              {loading && <LoadingSpinner size="sm" />}
+              <span>{loading ? "Signing in..." : "Sign In"}</span>
             </button>
-          </div>
-        </form>
-
-        <div className="text-center mt-8">
-          <p className="text-sm text-gray-600">
-            Don&apos;t have an account?{" "}
-            <button
-              onClick={() => router.push("/register")}
-              className="text-blue-500 hover:text-blue-700"
-            >
-              Register
-            </button>
-          </p>
+          </form>
         </div>
       </div>
     </div>

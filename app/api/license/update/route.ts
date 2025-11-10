@@ -40,16 +40,18 @@ export async function PATCH(req: Request) {
         { status: 400 }
       );
     }
-    // Check if a client exists with this email in the Client collection
-    const existingClient = await Client.findOne({ email: updateData.email });
-    if (!existingClient) {
-      return NextResponse.json(
-        {
-          error:
-            "No Client is registered with this email. Please the client through Super Admin.",
-        },
-        { status: 400 }
-      );
+    if (updateData.email) {
+      // Check if a client exists with this email in the Client collection
+      const existingClient = await Client.findOne({ email: updateData.email });
+      if (!existingClient || existingClient.status === "deactivated") {
+        return NextResponse.json(
+          {
+            error:
+              "No Client is registered with this email. Please the client through Super Admin.",
+          },
+          { status: 400 }
+        );
+      }
     }
     // Find and update the license
     // Update the license

@@ -2,6 +2,11 @@
 
 import React, { useState } from "react";
 import { useRouter } from "next/navigation";
+import FormInput from "@/app/components/forms/FormInput";
+import ErrorMessage from "@/app/components/ui/ErrorMessage";
+import SuccessMessage from "@/app/components/ui/SuccessMessage";
+import LoadingSpinner from "@/app/components/ui/LoadingSpinner";
+import ThemeToggle from "@/app/components/ui/ThemeToggle";
 
 export default function Register() {
   const router = useRouter();
@@ -14,6 +19,12 @@ export default function Register() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+
+  const validateEmail = (email: string): boolean => {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return emailRegex.test(email);
+  };
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target;
@@ -21,6 +32,45 @@ export default function Register() {
       ...formData,
       [name]: value,
     });
+
+    // Clear field error when user starts typing
+    if (fieldErrors[name]) {
+      setFieldErrors({
+        ...fieldErrors,
+        [name]: "",
+      });
+    }
+
+    if (error) setError("");
+  };
+
+  const validateForm = (): boolean => {
+    const errors: Record<string, string> = {};
+
+    if (!formData.name.trim()) {
+      errors.name = "Name is required";
+    }
+
+    if (!formData.email.trim()) {
+      errors.email = "Email is required";
+    } else if (!validateEmail(formData.email)) {
+      errors.email = "Please enter a valid email address";
+    }
+
+    if (!formData.password) {
+      errors.password = "Password is required";
+    } else if (formData.password.length < 8) {
+      errors.password = "Password must be at least 8 characters";
+    }
+
+    if (!formData.confirmPassword) {
+      errors.confirmPassword = "Please confirm your password";
+    } else if (formData.password !== formData.confirmPassword) {
+      errors.confirmPassword = "Passwords do not match";
+    }
+
+    setFieldErrors(errors);
+    return Object.keys(errors).length === 0;
   };
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
@@ -29,9 +79,7 @@ export default function Register() {
     setError("");
     setSuccess("");
 
-    // Validate passwords match
-    if (formData.password !== formData.confirmPassword) {
-      setError("Passwords do not match");
+    if (!validateForm()) {
       setLoading(false);
       return;
     }
@@ -43,8 +91,8 @@ export default function Register() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          name: formData.name,
-          email: formData.email,
+          name: formData.name.trim(),
+          email: formData.email.trim(),
           password: formData.password,
         }),
       });
@@ -55,7 +103,7 @@ export default function Register() {
         throw new Error(data.error || "Registration failed");
       }
 
-      setSuccess("Registration successful! You can now log in.");
+      setSuccess("Registration successful! Redirecting to login...");
 
       // Reset form
       setFormData({
@@ -77,123 +125,110 @@ export default function Register() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-white">
-      <div className="max-w-md w-full p-6  rounded-lg shadow-lg">
-        <h1 className="text-2xl font-bold text-center text-gray-800 mb-8">
-          Register Admin Account
-        </h1>
-
-        {error && (
-          <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
-            {error}
+    <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 transition-colors px-4 py-8 relative">
+      <div className="absolute top-4 right-4">
+        <ThemeToggle variant="light" />
+      </div>
+      <div className="max-w-md w-full">
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg border border-gray-200 dark:border-gray-700 p-6 sm:p-8 transition-colors">
+          <div className="text-center mb-8">
+            <h1 className="text-3xl font-bold text-gray-900 dark:text-gray-100 mb-2">
+              Register Admin Account
+            </h1>
+            <p className="text-gray-600 dark:text-gray-400 text-sm">
+              Create a new administrator account
+            </p>
           </div>
-        )}
-        {success && (
-          <div className="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded mb-4">
-            {success}
-          </div>
-        )}
 
-        <form onSubmit={handleSubmit}>
-          <div className="mb-4">
-            <label
-              className="block text-black text-sm font-bold mb-2"
-              htmlFor="name"
-            >
-              Name
-            </label>
-            <input
-              type="text"
-              id="name"
+          {error && (
+            <div className="mb-6">
+              <ErrorMessage message={error} onDismiss={() => setError("")} />
+            </div>
+          )}
+
+          {success && (
+            <div className="mb-6">
+              <SuccessMessage message={success} />
+            </div>
+          )}
+
+          <form onSubmit={handleSubmit}>
+            <FormInput
+              label="Full Name"
               name="name"
+              type="text"
               value={formData.name}
               onChange={handleChange}
-              className="w-full px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-              placeholder="Enter your name"
               required
+              error={fieldErrors.name}
+              placeholder="Enter your full name"
+              disabled={loading}
+              className="mb-4"
             />
-          </div>
 
-          <div className="mb-4">
-            <label
-              className="block text-black text-sm font-bold mb-2"
-              htmlFor="email"
-            >
-              Email
-            </label>
-            <input
-              type="email"
-              id="email"
+            <FormInput
+              label="Email Address"
               name="email"
+              type="email"
               value={formData.email}
               onChange={handleChange}
-              className="w-full px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-              placeholder="Enter your email"
               required
+              error={fieldErrors.email}
+              placeholder="Enter your email"
+              disabled={loading}
+              className="mb-4"
             />
-          </div>
 
-          <div className="mb-4">
-            <label
-              className="block text-black text-sm font-bold mb-2"
-              htmlFor="password"
-            >
-              Password
-            </label>
-            <input
-              type="password"
-              id="password"
+            <FormInput
+              label="Password"
               name="password"
+              type="password"
               value={formData.password}
               onChange={handleChange}
-              className="w-full px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-              placeholder="Enter your password"
               required
+              error={fieldErrors.password}
+              placeholder="Enter your password (min. 8 characters)"
+              helperText="Password must be at least 8 characters long"
+              disabled={loading}
               minLength={8}
+              className="mb-4"
             />
-          </div>
 
-          <div className="mb-6">
-            <label
-              className="block text-black text-sm font-bold mb-2"
-              htmlFor="confirmPassword"
-            >
-              Confirm Password
-            </label>
-            <input
-              type="password"
-              id="confirmPassword"
+            <FormInput
+              label="Confirm Password"
               name="confirmPassword"
+              type="password"
               value={formData.confirmPassword}
               onChange={handleChange}
-              className="w-full px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-              placeholder="Confirm your password"
               required
+              error={fieldErrors.confirmPassword}
+              placeholder="Confirm your password"
+              disabled={loading}
               minLength={8}
+              className="mb-6"
             />
-          </div>
 
-          <div className="flex items-center justify-between">
             <button
               type="submit"
               disabled={loading}
-              className="w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline"
+              className="w-full bg-blue-600 dark:bg-blue-700 text-white font-semibold py-3 px-4 rounded-md hover:bg-blue-700 dark:hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:focus:ring-offset-gray-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center space-x-2"
             >
-              {loading ? "Registering..." : "Register"}
+              {loading && <LoadingSpinner size="sm" />}
+              <span>{loading ? "Registering..." : "Register"}</span>
             </button>
-          </div>
-        </form>
+          </form>
 
-        <div className="text-center mt-8">
-          <p className="text-sm text-black">
-            Already have an account?{" "}
-            <button
-              onClick={() => router.push("/")}
-              className="text-blue-500 hover:text-blue-700"
-            >
-              Sign In
-            </button>
-          </p>
+          <div className="text-center mt-6">
+            <p className="text-sm text-gray-600 dark:text-gray-400">
+              Already have an account?{" "}
+              <button
+                onClick={() => router.push("/")}
+                className="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 font-medium transition-colors"
+              >
+                Sign In
+              </button>
+            </p>
+          </div>
         </div>
       </div>
     </div>

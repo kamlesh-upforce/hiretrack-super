@@ -3,6 +3,12 @@
 import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { IClient } from "@/app/models/client";
+import FormInput from "@/app/components/forms/FormInput";
+import FormTextarea from "@/app/components/forms/FormTextarea";
+import ErrorMessage from "@/app/components/ui/ErrorMessage";
+import SuccessMessage from "@/app/components/ui/SuccessMessage";
+import LoadingSpinner from "@/app/components/ui/LoadingSpinner";
+import { api } from "@/app/utils/api";
 
 interface ClientEditFormProps {
   id: string;
@@ -14,11 +20,11 @@ export default function ClientEditForm({ id }: ClientEditFormProps) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [formData, setFormData] = useState<Partial<IClient>>({
     name: "",
     email: "",
-    machineCode: "",
-    currentVersion: "",
+    notes: "",
   });
 
   // Fetch client data
@@ -26,22 +32,16 @@ export default function ClientEditForm({ id }: ClientEditFormProps) {
     const fetchClient = async () => {
       try {
         setLoading(true);
-        const response = await fetch(`/api/client/read?_id=${id}`);
+        const clientData = await api.get<IClient>(`/api/client/read?_id=${id}`);
 
-        if (!response.ok) {
-          throw new Error("Failed to fetch client data");
-        }
-
-        const clientData = await response.json();
         setFormData({
           name: clientData.name || "",
           email: clientData.email || "",
-          machineCode: clientData.machineCode || "",
-          currentVersion: clientData.currentVersion || "",
+          notes: clientData.notes || "",
         });
         setLoading(false);
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Unknown error");
+        setError(err instanceof Error ? err.message : "Failed to fetch client data");
         setLoading(false);
       }
     };
@@ -50,6 +50,11 @@ export default function ClientEditForm({ id }: ClientEditFormProps) {
       fetchClient();
     }
   }, [id]);
+
+  const validateEmail = (email: string): boolean => {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return emailRegex.test(email);
+  };
 
   // Handle form input changes
   const handleChange = (
@@ -60,6 +65,36 @@ export default function ClientEditForm({ id }: ClientEditFormProps) {
       ...prev,
       [name]: value,
     }));
+
+    // Clear field error when user starts typing
+    if (fieldErrors[name]) {
+      setFieldErrors({
+        ...fieldErrors,
+        [name]: "",
+      });
+    }
+
+    // Clear general error
+    if (error) {
+      setError("");
+    }
+  };
+
+  const validateForm = (): boolean => {
+    const errors: Record<string, string> = {};
+
+    if (!formData.name?.trim()) {
+      errors.name = "Name is required";
+    }
+
+    if (!formData.email?.trim()) {
+      errors.email = "Email is required";
+    } else if (!validateEmail(formData.email)) {
+      errors.email = "Please enter a valid email address";
+    }
+
+    setFieldErrors(errors);
+    return Object.keys(errors).length === 0;
   };
 
   // Handle form submission
@@ -69,145 +104,121 @@ export default function ClientEditForm({ id }: ClientEditFormProps) {
     setError("");
     setSuccess("");
 
-    try {
-      // Validate email (simple validation)
-      if (!formData.email || !formData.email.includes("@")) {
-        throw new Error("Please enter a valid email address");
-      }
+    if (!validateForm()) {
+      setSubmitting(false);
+      return;
+    }
 
-      // Submit update to API
-      const response = await fetch("/api/client/update", {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          _id: id,
-          name: formData.name,
-          email: formData.email,
-          machineCode: formData.machineCode || undefined,
-          currentVersion: formData.currentVersion || undefined,
-        }),
+    try {
+      await api.patch("/api/client/update", {
+        _id: id,
+        name: formData.name,
+        email: formData.email,
+        notes: formData.notes || undefined,
       });
 
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.error || "Failed to update client");
-      }
-
-      setSuccess("Client updated successfully");
+      setSuccess("Client updated successfully! Redirecting...");
 
       // Navigate back to client details after a short delay
       setTimeout(() => {
         router.push(`/dashboard/clients/${id}`);
       }, 1500);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unknown error");
+      setError(err instanceof Error ? err.message : "Failed to update client");
     } finally {
       setSubmitting(false);
     }
   };
 
   if (loading) {
-    return <div className="container mx-auto p-4">Loading client data...</div>;
+    return (
+      <div className="container mx-auto px-4 py-8">
+        <div className="flex justify-center items-center min-h-[400px]">
+          <LoadingSpinner size="lg" />
+        </div>
+      </div>
+    );
   }
 
   return (
-    <div className="container mx-auto p-4 max-w-2xl">
-      <div className="flex justify-between items-center mb-6">
-        <h1 className="text-2xl font-bold text-gray-800">Edit Client</h1>
-        <button
-          onClick={() => router.push(`/dashboard/clients/${id}`)}
-          className="bg-gray-300 text-gray-800 px-4 py-2 rounded hover:bg-gray-400"
-        >
-          Cancel
-        </button>
+    <div className="container mx-auto px-4 py-6 sm:py-8 max-w-2xl">
+      <div className="mb-6">
+        <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-gray-100 mb-2">Edit Client</h1>
+        <p className="text-gray-600 dark:text-gray-400">
+          Update client information. Fields marked with * are required.
+        </p>
       </div>
 
       {error && (
-        <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
-          {error}
+        <div className="mb-6">
+          <ErrorMessage message={error} onDismiss={() => setError("")} />
         </div>
       )}
 
       {success && (
-        <div className="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded mb-4">
-          {success}
+        <div className="mb-6">
+          <SuccessMessage message={success} />
         </div>
       )}
 
-      <form onSubmit={handleSubmit} className="bg-white p-6 rounded shadow">
-        <div className="mb-4">
-          <label className="block text-gray-700 mb-2" htmlFor="name">
-            Name
-          </label>
-          <input
-            type="text"
-            id="name"
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 p-4 sm:p-6 transition-colors">
+        <form onSubmit={handleSubmit}>
+          <FormInput
+            label="Client Name"
             name="name"
-            value={formData.name}
-            onChange={handleChange}
-            className="w-full px-3 py-2 border rounded focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-          />
-        </div>
-
-        <div className="mb-4">
-          <label className="block text-gray-700 mb-2" htmlFor="email">
-            Email <span className="text-red-500">*</span>
-          </label>
-          <input
-            type="email"
-            id="email"
-            name="email"
-            value={formData.email}
+            type="text"
+            value={formData.name || ""}
             onChange={handleChange}
             required
-            className="w-full px-3 py-2 border rounded focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-          />
-          <p className="text-sm text-gray-500 mt-1">
-            Email is used as the unique identifier and cannot be changed.
-          </p>
-        </div>
-
-        <div className="mb-4">
-          <label className="block text-gray-700 mb-2" htmlFor="machineCode">
-            Machine Code
-          </label>
-          <input
-            type="text"
-            id="machineCode"
-            name="machineCode"
-            value={formData.machineCode}
-            onChange={handleChange}
-            className="w-full px-3 py-2 border rounded focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-          />
-        </div>
-
-        <div className="mb-6">
-          <label className="block text-gray-700 mb-2" htmlFor="currentVersion">
-            Current Version
-          </label>
-          <input
-            type="text"
-            id="currentVersion"
-            name="currentVersion"
-            value={formData.currentVersion}
-            onChange={handleChange}
-            placeholder="e.g. 1.0.0"
-            className="w-full px-3 py-2 border rounded focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-          />
-        </div>
-
-        <div className="flex justify-end">
-          <button
-            type="submit"
+            error={fieldErrors.name}
+            placeholder="Enter client name"
             disabled={submitting}
-            className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 disabled:opacity-50"
-          >
-            {submitting ? "Updating..." : "Update Client"}
-          </button>
-        </div>
-      </form>
+          />
+
+          <FormInput
+            label="Email Address"
+            name="email"
+            type="email"
+            value={formData.email || ""}
+            onChange={handleChange}
+            required
+            error={fieldErrors.email}
+            placeholder="client@example.com"
+            helperText="Email is used as the unique identifier and cannot be changed."
+            disabled={submitting}
+          />
+
+          <FormTextarea
+            label="Notes"
+            name="notes"
+            value={formData.notes || ""}
+            onChange={handleChange}
+            rows={4}
+            placeholder="Additional notes about this client (optional)"
+            helperText="Optional: Add any additional information about this client"
+            disabled={submitting}
+          />
+
+          <div className="flex items-center justify-between pt-4 border-t border-gray-200 dark:border-gray-700">
+            <button
+              type="button"
+              onClick={() => router.push(`/dashboard/clients/${id}`)}
+              disabled={submitting}
+              className="px-6 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-50 dark:hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:focus:ring-offset-gray-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed font-medium"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={submitting}
+              className="px-6 py-2 bg-blue-600 dark:bg-blue-700 text-white rounded-md hover:bg-blue-700 dark:hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:focus:ring-offset-gray-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed font-medium flex items-center space-x-2"
+            >
+              {submitting && <LoadingSpinner size="sm" />}
+              <span>{submitting ? "Updating..." : "Update Client"}</span>
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }

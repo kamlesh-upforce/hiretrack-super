@@ -2,51 +2,59 @@
 
 import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import { Download, ArrowLeft, ArrowRight } from "lucide-react";
 import { ILicense } from "@/app/models/license";
 import { IClient } from "@/app/models/client";
+import LoadingSpinner from "@/app/components/ui/LoadingSpinner";
+import ErrorMessage from "@/app/components/ui/ErrorMessage";
+import SuccessMessage from "@/app/components/ui/SuccessMessage";
+import { StatusBadge } from "@/app/components/ui/StatusBadge";
+import { formatDate } from "@/app/utils/formatters";
+import { api } from "@/app/utils/api";
 
-// Define props for the client component
 interface LicenseDetailClientProps {
   id: string;
 }
 
-export default function LicenseDetailClient({ id }: LicenseDetailClientProps) {
+export default function LicenseDetailClient({
+  id,
+}: LicenseDetailClientProps) {
   const router = useRouter();
-
   const [license, setLicense] = useState<ILicense | null>(null);
   const [client, setClient] = useState<IClient | null>(null);
   const [loading, setLoading] = useState(true);
+  const [updating, setUpdating] = useState(false);
   const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
   const [statusUpdate, setStatusUpdate] = useState("");
 
   useEffect(() => {
     const fetchLicenseDetails = async () => {
       try {
         setLoading(true);
+        setError("");
 
-        // Fetch license details
-        const licenseResponse = await fetch(`/api/license/read?licenseKey=${id}`);
-        if (!licenseResponse.ok) {
-          throw new Error("Failed to fetch license details");
-        }
-
-        const licenseData = await licenseResponse.json();
+        // Fetch license details by ID
+        const licenseData = await api.get<ILicense>(
+          `/api/license/read?licenseKey=${id}`
+        );
         setLicense(licenseData);
         setStatusUpdate(licenseData.status);
-        // Fetch client details
-        const clientResponse = await fetch(
-          `/api/client/read?email=${licenseData.email}`
-        );
-        if (!clientResponse.ok) {
-          throw new Error("Failed to fetch client details");
-        }
 
-        const clientData = await clientResponse.json();
-        setClient(clientData);
+        // Fetch client details
+        try {
+          const clientData = await api.get<IClient>(
+            `/api/client/read?email=${licenseData.email}`
+          );
+          setClient(clientData);
+        } catch (clientError) {
+          // Client might not exist, that's okay
+          console.log("Client not found for this license");
+        }
 
         setLoading(false);
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Unknown error");
+        setError(err instanceof Error ? err.message : "Failed to fetch license details");
         setLoading(false);
       }
     };
@@ -57,56 +65,50 @@ export default function LicenseDetailClient({ id }: LicenseDetailClientProps) {
   }, [id]);
 
   const handleStatusChange = async () => {
+    if (!license) return;
+
     try {
-      const response = await fetch("/api/license/update", {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          licenseKey: license?.licenseKey,
-          status: statusUpdate,
-        }),
+      setUpdating(true);
+      setError("");
+      setSuccess("");
+
+      const response = await api.patch("/api/license/update", {
+        licenseKey: license.licenseKey,
+        status: statusUpdate,
       });
 
-      if (!response.ok) {
-        throw new Error("Failed to update license status");
-      }
-
-      const updatedLicense = await response.json();
-      setLicense(updatedLicense.license);
-      alert("License status updated successfully");
+      setLicense((prev) =>
+        prev ? { ...prev, status: statusUpdate as any } : null
+      );
+      setSuccess("License status updated successfully");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unknown error");
+      setError(err instanceof Error ? err.message : "Failed to update license status");
+    } finally {
+      setUpdating(false);
     }
   };
 
   const handleDownloadLicense = () => {
+    if (!license) return;
+
     try {
-      // Create license.json content
       const licenseData = {
-        licenseKey: license?.licenseKey,
-        status: license?.status,
-        // allowedVersion: license?.allowedVersion,
-        machineCode: license?.machineCode || "",
-        createdAt: license?.createdAt,
+        licenseKey: license.licenseKey,
+        status: license.status,
+        machineCode: license.machineCode || "",
+        createdAt: license.createdAt,
         clientName: client?.name || "",
         clientEmail: client?.email || "",
       };
 
-      // Convert to JSON string
       const licenseJson = JSON.stringify(licenseData, null, 2);
-
-      // Create a blob and download link
       const blob = new Blob([licenseJson], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `license-${license?.licenseKey}.json`;
+      a.download = `license-${license.licenseKey}.json`;
       document.body.appendChild(a);
       a.click();
-
-      // Clean up
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
     } catch (err) {
@@ -115,129 +117,150 @@ export default function LicenseDetailClient({ id }: LicenseDetailClientProps) {
     }
   };
 
-  const formatDate = (dateString: string) => {
-    if (!dateString) return "N/A";
-    return new Date(dateString).toLocaleString();
-  };
-
-  if (loading) return <div className="container mx-auto p-4">Loading...</div>;
-  if (error)
+  if (loading) {
     return (
-      <div className="container mx-auto p-4 text-red-500">Error: {error}</div>
+      <div className="container mx-auto px-4 py-8">
+        <div className="flex justify-center items-center min-h-[400px]">
+          <LoadingSpinner size="lg" />
+        </div>
+      </div>
     );
-  if (!license)
-    return <div className="container mx-auto p-4">License not found</div>;
+  }
+
+  if (error && !license) {
+    return (
+      <div className="container mx-auto px-4 py-8">
+        <ErrorMessage message={error} />
+      </div>
+    );
+  }
+
+  if (!license) {
+    return (
+      <div className="container mx-auto px-4 py-8">
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 p-6">
+          <p className="text-gray-600 dark:text-gray-400 text-center">
+            License not found
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="container mx-auto p-4">
-      <div className="flex justify-between items-center mb-6">
-        <h1 className="text-2xl font-bold text-gray-800">License Details</h1>
-        <div className="flex space-x-2">
+    <div className="container mx-auto px-4 py-4 sm:py-6">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
+        <div>
+          <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-gray-100 mb-2">
+            License Details
+          </h1>
+          <p className="text-gray-600 dark:text-gray-400">
+            View and manage license information
+          </p>
+        </div>
+        <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
           <button
             onClick={handleDownloadLicense}
-            className="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600 flex items-center"
+            className="w-full sm:w-auto bg-green-600 dark:bg-green-700 text-white px-4 py-2 rounded-md hover:bg-green-700 dark:hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 dark:focus:ring-offset-gray-800 transition-colors font-medium flex items-center justify-center space-x-2"
           >
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              className="h-5 w-5 mr-2"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"
-              />
-            </svg>
-            Download License
+            <Download className="w-5 h-5" />
+            <span>Download License</span>
           </button>
           <button
             onClick={() => router.push("/dashboard")}
-            className="bg-gray-300 text-gray-800 px-4 py-2 rounded hover:bg-gray-400"
+            className="w-full sm:w-auto px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-50 dark:hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:focus:ring-offset-gray-800 transition-colors font-medium flex items-center justify-center space-x-2"
           >
-            Back to Dashboard
+            <ArrowLeft className="w-4 h-4" />
+            <span>Back to Dashboard</span>
           </button>
         </div>
       </div>
 
-      <div className="bg-white p-6 rounded shadow mb-6">
-        <h2 className="text-xl font-semibold mb-4 text-gray-800">
+      {error && (
+        <div className="mb-6">
+          <ErrorMessage message={error} onDismiss={() => setError("")} />
+        </div>
+      )}
+
+      {success && (
+        <div className="mb-6">
+          <SuccessMessage message={success} onDismiss={() => setSuccess("")} />
+        </div>
+      )}
+
+      {/* License Information */}
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 p-4 sm:p-6 mb-6 transition-colors">
+        <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100 mb-6">
           License Information
         </h2>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6 mb-6">
           <div>
-            <p className="text-gray-600">License Key</p>
-            <p className="font-medium text-gray-800">{license.licenseKey}</p>
-          </div>
-
-          <div>
-            <p className="text-gray-600">Status</p>
-            <p className="font-medium">
-              <span
-                className={`px-2 py-1 rounded text-xs ${
-                  license.status === "active"
-                    ? "bg-green-100 text-green-800"
-                    : license.status === "inactive"
-                      ? "bg-yellow-100 text-yellow-800"
-                      : "bg-red-100 text-red-800"
-                }`}
-              >
-                {license.status}
-              </span>
+            <p className="text-sm font-medium text-gray-500 dark:text-gray-400 mb-1">
+              License Key
+            </p>
+            <p className="text-lg font-semibold text-gray-900 dark:text-gray-100 font-mono break-all">
+              {license.licenseKey}
             </p>
           </div>
 
-          {/* <div>
-            <p className="text-gray-600">Allowed Version</p>
-            <p className="font-medium text-gray-800">
-              {license.allowedVersion}
+          <div>
+            <p className="text-sm font-medium text-gray-500 dark:text-gray-400 mb-1">
+              Status
             </p>
-          </div> */}
+            <div className="mt-1">
+              <StatusBadge status={license.status} />
+            </div>
+          </div>
 
           <div>
-            <p className="text-gray-600">Installed Version</p>
-            <p className="font-medium text-gray-800">
+            <p className="text-sm font-medium text-gray-500 dark:text-gray-400 mb-1">
+              Installed Version
+            </p>
+            <p className="text-lg font-semibold text-gray-900 dark:text-gray-100">
               {license.installedVersion || "Not installed"}
             </p>
           </div>
 
           <div>
-            <p className="text-gray-600">Machine Code</p>
-            <p className="font-medium text-gray-800">
+            <p className="text-sm font-medium text-gray-500 dark:text-gray-400 mb-1">
+              Machine Code
+            </p>
+            <p className="text-lg font-semibold text-gray-900 dark:text-gray-100 font-mono">
               {license.machineCode || "Not bound to any machine"}
             </p>
           </div>
 
-          {/* Expiry date is commented out in the model */}
-
           <div>
-            <p className="text-gray-600">Created At</p>
-            <p className="font-medium text-gray-800">
-              {formatDate(license.createdAt.toString())}
+            <p className="text-sm font-medium text-gray-500 dark:text-gray-400 mb-1">
+              Created At
+            </p>
+            <p className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+              {formatDate(license.createdAt?.toString())}
             </p>
           </div>
 
           <div>
-            <p className="text-gray-600">Last Updated</p>
-            <p className="font-medium text-gray-800">
-              {formatDate(license.updatedAt.toString())}
+            <p className="text-sm font-medium text-gray-500 dark:text-gray-400 mb-1">
+              Last Updated
+            </p>
+            <p className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+              {formatDate(license.updatedAt?.toString())}
             </p>
           </div>
         </div>
 
         {/* Status Update Form */}
-        <div className="border-t pt-4">
-          <h3 className="font-medium mb-2 text-gray-800">
+        <div className="border-t border-gray-200 dark:border-gray-700 pt-6">
+          <h3 className="font-medium mb-4 text-gray-900 dark:text-gray-100">
             Update License Status
           </h3>
-          <div className="flex items-center">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
             <select
               value={statusUpdate}
               onChange={(e) => setStatusUpdate(e.target.value)}
-              className="mr-2 px-3 py-2 border rounded"
+              disabled={updating}
+              className="flex-1 sm:flex-initial px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors disabled:opacity-50"
             >
               <option value="active">Active</option>
               <option value="inactive">Inactive</option>
@@ -245,9 +268,11 @@ export default function LicenseDetailClient({ id }: LicenseDetailClientProps) {
             </select>
             <button
               onClick={handleStatusChange}
-              className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
+              disabled={updating || statusUpdate === license.status}
+              className="w-full sm:w-auto bg-blue-600 dark:bg-blue-700 text-white px-6 py-2 rounded-md hover:bg-blue-700 dark:hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:focus:ring-offset-gray-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed font-medium flex items-center justify-center space-x-2"
             >
-              Update Status
+              {updating && <LoadingSpinner size="sm" />}
+              <span>{updating ? "Updating..." : "Update Status"}</span>
             </button>
           </div>
         </div>
@@ -255,30 +280,38 @@ export default function LicenseDetailClient({ id }: LicenseDetailClientProps) {
 
       {/* Client Information */}
       {client && (
-        <div className="bg-white p-6 rounded shadow">
-          <h2 className="text-xl font-semibold mb-4 text-gray-800">
-            Client Information
-          </h2>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <p className="text-gray-600">Name</p>
-              <p className="font-medium text-gray-800">{client.name}</p>
-            </div>
-
-            <div>
-              <p className="text-gray-600">Email</p>
-              <p className="font-medium text-gray-800">{client.email}</p>
-            </div>
-          </div>
-
-          <div className="mt-4">
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 p-4 sm:p-6 transition-colors">
+          <div className="flex justify-between items-center mb-6">
+            <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
+              Client Information
+            </h2>
             <button
               onClick={() => router.push(`/dashboard/clients/${client._id}`)}
-              className="text-blue-500 hover:underline"
+              className="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 font-medium text-sm transition-colors flex items-center space-x-1"
             >
-              View Client Details
+              <span>View Details</span>
+              <ArrowRight className="w-4 h-4" />
             </button>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
+            <div>
+              <p className="text-sm font-medium text-gray-500 dark:text-gray-400 mb-1">
+                Name
+              </p>
+              <p className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+                {client.name || "N/A"}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-sm font-medium text-gray-500 dark:text-gray-400 mb-1">
+                Email
+              </p>
+              <p className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+                {client.email}
+              </p>
+            </div>
           </div>
         </div>
       )}

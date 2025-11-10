@@ -6,7 +6,7 @@ import { connectToDatabase } from "@/lib/db";
 export async function POST(req: Request) {
   try {
     await connectToDatabase();
-    const { email, name } = await req.json();
+    const { email, name, notes } = await req.json();
 
     // Check if client already exists
     const existingClient = await Client.findOne({ email });
@@ -21,6 +21,7 @@ export async function POST(req: Request) {
     const newClient = new Client({
       email,
       name,
+      notes: notes || undefined,
       licenseKey: "",
       machineCode: null,
       currentVersion: null,

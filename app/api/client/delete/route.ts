@@ -13,7 +13,7 @@ export async function DELETE(req: Request) {
       return NextResponse.json({ error: "Email is required" }, { status: 400 });
     }
 
-    const deletedClient = await Client.findOneAndDelete({ email });
+    const deletedClient = await Client.findOneAndUpdate({ email }, { status: "deactivated" }, { new: true });
     if (!deletedClient) {
       return NextResponse.json({ error: "Client not found" }, { status: 404 });
     }

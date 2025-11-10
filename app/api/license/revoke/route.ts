@@ -6,11 +6,11 @@ import License from "@/app/models/license";
 export async function POST(req: Request) {
   try {
     await connectToDatabase();
-    const { licenseKey } = await req.json();
+    const { licenseKey, status } = await req.json();
 
-    if (!licenseKey) {
+    if (!licenseKey || !status) {
       return NextResponse.json(
-        { error: "License key is required" },
+        { error: "License key and status are required" },
         { status: 400 }
       );
     }
@@ -18,7 +18,7 @@ export async function POST(req: Request) {
     // Find and update the license status to revoked
     const revokedLicense = await License.findOneAndUpdate(
       { licenseKey },
-      { status: "revoked" },
+      { status: status },
       { new: true }
     );
 

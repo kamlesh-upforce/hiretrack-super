@@ -1,5 +1,4 @@
 import crypto from "crypto";
-import jwt from "jsonwebtoken";
 import License from "@/app/models/license";
 import { connectToDatabase } from "./db";
 

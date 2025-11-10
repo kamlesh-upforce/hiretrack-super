@@ -2,6 +2,12 @@
 
 import React, { useState } from "react";
 import { useRouter } from "next/navigation";
+import FormInput from "@/app/components/forms/FormInput";
+import FormTextarea from "@/app/components/forms/FormTextarea";
+import ErrorMessage from "@/app/components/ui/ErrorMessage";
+import SuccessMessage from "@/app/components/ui/SuccessMessage";
+import LoadingSpinner from "@/app/components/ui/LoadingSpinner";
+import { api } from "@/app/utils/api";
 
 export default function CreateClient() {
   const router = useRouter();
@@ -14,6 +20,12 @@ export default function CreateClient() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+
+  const validateEmail = (email: string): boolean => {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return emailRegex.test(email);
+  };
 
   const handleChange = (
     e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>
@@ -23,30 +35,57 @@ export default function CreateClient() {
       ...formData,
       [name]: value,
     });
+
+    // Clear field error when user starts typing
+    if (fieldErrors[name]) {
+      setFieldErrors({
+        ...fieldErrors,
+        [name]: "",
+      });
+    }
+
+    // Clear general error
+    if (error) {
+      setError("");
+    }
+  };
+
+  const validateForm = (): boolean => {
+    const errors: Record<string, string> = {};
+
+    if (!formData.name.trim()) {
+      errors.name = "Name is required";
+    }
+
+    if (!formData.email.trim()) {
+      errors.email = "Email is required";
+    } else if (!validateEmail(formData.email)) {
+      errors.email = "Please enter a valid email address";
+    }
+
+    setFieldErrors(errors);
+    return Object.keys(errors).length === 0;
   };
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    setLoading(true);
     setError("");
     setSuccess("");
 
+    if (!validateForm()) {
+      return;
+    }
+
+    setLoading(true);
+
     try {
-      const response = await fetch("/api/client/create", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(formData),
+      await api.post("/api/client/create", {
+        name: formData.name.trim(),
+        email: formData.email.trim(),
+        notes: formData.notes.trim() || undefined,
       });
 
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || "Failed to create client");
-      }
-
-      setSuccess("Client created successfully");
+      setSuccess("Client created successfully! Redirecting...");
 
       // Reset form
       setFormData({
@@ -58,101 +97,95 @@ export default function CreateClient() {
       // Redirect after a short delay
       setTimeout(() => {
         router.push("/dashboard");
-      }, 2000);
+      }, 1500);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unknown error");
+      setError(err instanceof Error ? err.message : "Failed to create client");
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="container mx-auto p-4 max-w-md">
-      <h1 className="text-2xl font-bold mb-6 text-gray-800">
-        Create New Client
-      </h1>
+    <div className="container mx-auto px-4 py-6 sm:py-8 max-w-2xl">
+      <div className="mb-6">
+        <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-gray-100 mb-2">
+          Create New Client
+        </h1>
+        <p className="text-gray-600 dark:text-gray-400">
+          Add a new client to the system. All fields marked with * are required.
+        </p>
+      </div>
 
       {error && (
-        <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
-          {error}
-        </div>
-      )}
-      {success && (
-        <div className="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded mb-4">
-          {success}
+        <div className="mb-6">
+          <ErrorMessage message={error} onDismiss={() => setError("")} />
         </div>
       )}
 
-      <form
-        onSubmit={handleSubmit}
-        className="bg-white  p-6 rounded shadow border border-gray-200 dark:border-gray-700"
-      >
-        <div className="mb-4">
-          <label className="block mb-2 font-medium" htmlFor="name">
-            Name
-          </label>
-          <input
-            type="text"
-            id="name"
+      {success && (
+        <div className="mb-6">
+          <SuccessMessage message={success} />
+        </div>
+      )}
+
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 p-4 sm:p-6 transition-colors">
+        <form onSubmit={handleSubmit}>
+          <FormInput
+            label="Client Name"
             name="name"
+            type="text"
             value={formData.name}
             onChange={handleChange}
             required
-            className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded bg-white   focus:outline-none focus:ring-2 focus:ring-blue-400"
-            autoComplete="off"
-            spellCheck={false}
+            error={fieldErrors.name}
+            placeholder="Enter client name"
+            disabled={loading}
           />
-        </div>
 
-        <div className="mb-4">
-          <label className="block mb-2 font-medium" htmlFor="email">
-            Email
-          </label>
-          <input
-            type="email"
-            id="email"
+          <FormInput
+            label="Email Address"
             name="email"
+            type="email"
             value={formData.email}
             onChange={handleChange}
             required
-            className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded bg-white    focus:outline-none focus:ring-2 focus:ring-blue-400"
-            autoComplete="off"
-            spellCheck={false}
+            error={fieldErrors.email}
+            placeholder="client@example.com"
+            helperText="This email will be used as a unique identifier"
+            disabled={loading}
           />
-        </div>
 
-        <div className="mb-6">
-          <label className="block  mb-2 font-medium" htmlFor="notes">
-            Notes <span className="text-gray-500">(optional)</span>
-          </label>
-          <textarea
-            id="notes"
+          <FormTextarea
+            label="Notes"
             name="notes"
             value={formData.notes}
             onChange={handleChange}
-            rows={3}
-            className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded bg-white   focus:outline-none focus:ring-2 focus:ring-blue-400 resize-none"
-            spellCheck={false}
-          />
-        </div>
-
-        <div className="flex items-center justify-between">
-          <button
-            type="button"
-            onClick={() => router.push("/dashboard")}
-            className="bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200 px-4 py-2 rounded hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors"
-          >
-            Cancel
-          </button>
-          <button
-            type="submit"
+            rows={4}
+            placeholder="Additional notes about this client (optional)"
+            helperText="Optional: Add any additional information about this client"
             disabled={loading}
-            className={`bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed font-semibold`}
-          >
-            {loading ? "Creating..." : "Create Client"}
-          </button>
-        </div>
-      </form>
+          />
+
+          <div className="flex items-center justify-between pt-4 border-t border-gray-200 dark:border-gray-700">
+            <button
+              type="button"
+              onClick={() => router.push("/dashboard")}
+              disabled={loading}
+              className="px-6 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-50 dark:hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:focus:ring-offset-gray-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed font-medium"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={loading}
+              className="px-6 py-2 bg-blue-600 dark:bg-blue-700 text-white rounded-md hover:bg-blue-700 dark:hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:focus:ring-offset-gray-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed font-medium flex items-center space-x-2"
+            >
+              {loading && <LoadingSpinner size="sm" />}
+              <span>{loading ? "Creating..." : "Create Client"}</span>
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }
