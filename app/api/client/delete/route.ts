@@ -19,9 +19,13 @@ export async function DELETE(req: Request) {
     }
 
     return NextResponse.json({ message: "Client deleted successfully" });
-  } catch (error) {
+  } catch (error: unknown) {
+    console.error("Error deleting client:", error);
     return NextResponse.json(
-      { error: "Internal server error" },
+      { 
+        error: "Internal server error",
+        message: error instanceof Error ? error.message : "Unknown error"
+      },
       { status: 500 }
     );
   }

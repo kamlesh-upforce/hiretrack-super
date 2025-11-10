@@ -45,7 +45,7 @@ export default function ClientDetailComponent({
           );
           // Ensure it's an array
           setLicenses(Array.isArray(licensesData) ? licensesData : []);
-        } catch (licenseError) {
+        } catch {
           // If no licenses found, set empty array
           setLicenses([]);
         }
@@ -82,14 +82,14 @@ export default function ClientDetailComponent({
       setError("");
       setSuccess("");
 
-      const response = await api.patch("/api/client/toggle-status", {
+      await api.patch("/api/client/toggle-status", {
         _id: client._id,
         status: newStatus,
       });
 
-      setClient((prev) =>
-        prev ? { ...prev, status: newStatus as any } : null
-      );
+      // Refetch client data to get the updated status
+      const updatedClient = await api.get<IClient>(`/api/client/read?_id=${id}`);
+      setClient(updatedClient);
       setSuccess(`Client ${action}d successfully`);
     } catch (err) {
       setError(err instanceof Error ? err.message : `Failed to ${action} client`);

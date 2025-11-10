@@ -47,7 +47,7 @@ export default function LicenseDetailClient({
             `/api/client/read?email=${licenseData.email}`
           );
           setClient(clientData);
-        } catch (clientError) {
+        } catch {
           // Client might not exist, that's okay
           console.log("Client not found for this license");
         }
@@ -72,14 +72,16 @@ export default function LicenseDetailClient({
       setError("");
       setSuccess("");
 
-      const response = await api.patch("/api/license/update", {
+      await api.patch("/api/license/update", {
         licenseKey: license.licenseKey,
         status: statusUpdate,
       });
 
-      setLicense((prev) =>
-        prev ? { ...prev, status: statusUpdate as any } : null
+      // Refetch license data to get the updated status
+      const updatedLicense = await api.get<ILicense>(
+        `/api/license/read?licenseKey=${license.licenseKey}`
       );
+      setLicense(updatedLicense);
       setSuccess("License status updated successfully");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to update license status");

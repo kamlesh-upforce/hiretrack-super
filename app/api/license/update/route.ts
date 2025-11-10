@@ -95,10 +95,13 @@ export async function PATCH(req: Request) {
     //   message: "License updated successfully",
     //   // license: updatedLicense,
     // });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Error updating license:", error);
     return NextResponse.json(
-      { error: "Internal server error", message: error.message },
+      { 
+        error: "Internal server error", 
+        message: error instanceof Error ? error.message : "Unknown error" 
+      },
       { status: 500 }
     );
   }
