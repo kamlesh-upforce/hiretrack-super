@@ -1292,10 +1292,12 @@ check_update_and_install() {
     log "📦 File size: $FILE_SIZE_DISPLAY"
 
     # Extract archive (tar will validate the archive format)
-    if rm --help 2>&1 | grep -q -- '--no-preserve-root'; then
-        sudo rm -rf --no-preserve-root "$APP_INSTALL_DIR"
-    else
-        sudo rm -rf "$APP_INSTALL_DIR"
+    if [ -d "$APP_INSTALL_DIR" ]; then
+       if rm --help 2>&1 | grep -q -- '--no-preserve-root'; then
+            sudo rm -rf --no-preserve-root "$APP_INSTALL_DIR" 2>/dev/null || true
+        else
+            sudo rm -rf "$APP_INSTALL_DIR" 2>/dev/null || true
+        fi
     fi
     mkdir -p "$APP_INSTALL_DIR"
     log "📂 Extracting archive to $APP_INSTALL_DIR..."
