@@ -4,6 +4,7 @@ import License from "../../../models/license";
 import History from "../../../models/history";
 import { connectToDatabase } from "@/lib/db";
 import { Types } from "mongoose";
+import { getAdminNameFromRequest } from "@/lib/getAdminFromRequest";
 
 // PATCH: Toggle client status (activate/deactivate)
 export async function PATCH(req: Request) {
@@ -43,6 +44,9 @@ export async function PATCH(req: Request) {
       { new: true }
     );
 
+    // Get admin name from token
+    const adminName = await getAdminNameFromRequest();
+
     // Log history for client status change
     await History.create({
       entityType: "client",
@@ -52,6 +56,7 @@ export async function PATCH(req: Request) {
       oldValue: oldStatus,
       newValue: newStatus,
       notes: notes || undefined,
+      createdBy: adminName || undefined,
     });
 
     // If client is being deactivated, also deactivate all licenses associated with their email
@@ -73,6 +78,7 @@ export async function PATCH(req: Request) {
             oldValue: license.status,
             newValue: "inactive",
             notes: `Automatically deactivated when client ${client.email} was deactivated`,
+            createdBy: adminName || undefined,
           });
         }
       }

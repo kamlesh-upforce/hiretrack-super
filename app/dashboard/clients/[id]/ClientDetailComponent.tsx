@@ -1,8 +1,8 @@
 "use client";
 
-import React, { useMemo, useState, useEffect } from "react";
+import React, { useMemo, useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, Edit, Clock, Key, User, Mail, Calendar, FileText, Cpu, MoreVertical, CheckCircle, XCircle } from "lucide-react";
+import { ArrowLeft, Edit, Clock, Key, User, Mail, Calendar, FileText, Cpu, CheckCircle, XCircle } from "lucide-react";
 import { IClient } from "@/app/models/client";
 import { ILicense } from "@/app/models/license";
 import LoadingSpinner from "@/app/components/ui/LoadingSpinner";
@@ -75,23 +75,7 @@ export default function ClientDetailComponent({
   const [showLicenseNoteDialog, setShowLicenseNoteDialog] = useState(false);
   const [updatingLicense, setUpdatingLicense] = useState(false);
   const [licenseActionType, setLicenseActionType] = useState<"activate" | "deactivate" | "revoke" | null>(null);
-  const [showLicenseMenu, setShowLicenseMenu] = useState(false);
-
-  // Close license menu when clicking outside
-  useEffect(() => {
-    const handleClickOutside = () => {
-      if (showLicenseMenu) {
-        setShowLicenseMenu(false);
-      }
-    };
-
-    if (showLicenseMenu) {
-      document.addEventListener("mousedown", handleClickOutside);
-      return () => {
-        document.removeEventListener("mousedown", handleClickOutside);
-      };
-    }
-  }, [showLicenseMenu]);
+  const licenseActionTypeRef = useRef<"activate" | "deactivate" | "revoke" | null>(null);
 
   useEffect(() => {
     const fetchClientDetails = async () => {
@@ -254,13 +238,25 @@ export default function ClientDetailComponent({
     handleToggleStatus(note.trim() || undefined);
   };
 
-  const handleLicenseToggleStatus = async (note?: string) => {
-    if (!primaryLicense || !licenseActionType) return;
+  const handleLicenseToggleStatus = async (note?: string, actionType?: "activate" | "deactivate" | "revoke") => {
+    if (!primaryLicense) {
+      console.error("handleLicenseToggleStatus: No primary license");
+      setError("No license found");
+      return;
+    }
+
+    // Use provided actionType or fallback to state
+    const currentActionType = actionType || licenseActionType;
+    if (!currentActionType) {
+      console.error("handleLicenseToggleStatus: No action type provided");
+      setError("No action type specified");
+      return;
+    }
 
     let newStatus: "active" | "inactive" | "revoked";
     let action: string;
 
-    switch (licenseActionType) {
+    switch (currentActionType) {
       case "activate":
         newStatus = "active";
         action = "activate";
@@ -282,13 +278,18 @@ export default function ClientDetailComponent({
       setError("");
       setSuccess("");
 
-      await api.patch("/api/license/toggle-status", {
-        _id: idToString(primaryLicense._id),
+      const licenseId = idToString(primaryLicense._id);
+      console.log("Changing license status:", { licenseId, newStatus, action: currentActionType, note });
+
+      const response = await api.patch("/api/license/toggle-status", {
+        _id: licenseId,
         status: newStatus,
         notes: note || undefined,
       });
 
-      // Refetch license data and history
+      console.log("License status change response:", response);
+
+      // Refetch license data, history, and validation history
       try {
         const refreshedLicenses = await api.get<ILicense[]>(
           `/api/license/read?email=${client?.email}`
@@ -320,6 +321,16 @@ export default function ClientDetailComponent({
             new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
           );
           setHistory(allHistory);
+
+          // Refetch validation history
+          try {
+            const validationHistoryData = await api.get<IValidationHistory[]>(
+              `/api/validation-history/read?email=${client?.email}&limit=50`
+            );
+            setValidationHistory(Array.isArray(validationHistoryData) ? validationHistoryData : []);
+          } catch {
+            // Ignore validation history errors
+          }
         } else {
           // If no licenses, just get client history
           const clientHistoryData = await api.get<IHistory[]>(
@@ -342,15 +353,29 @@ export default function ClientDetailComponent({
 
   const initiateLicenseStatusChange = (actionType: "activate" | "deactivate" | "revoke") => {
     if (!primaryLicense) return;
+    licenseActionTypeRef.current = actionType;
     setLicenseActionType(actionType);
-    setShowLicenseMenu(false);
     setShowLicenseNoteDialog(true);
   };
 
   const handleLicenseNoteConfirm = (note: string) => {
     setShowLicenseNoteDialog(false);
-    handleLicenseToggleStatus(note.trim() || undefined);
+    // Use ref to get the action type (avoids React state timing issues)
+    const actionType = licenseActionTypeRef.current;
+    licenseActionTypeRef.current = null;
     setLicenseActionType(null);
+    // Call the handler with the captured action type
+    if (!actionType) {
+      console.error("No action type found when confirming license status change");
+      setError("Failed to change license status: No action type specified");
+      return;
+    }
+    if (!primaryLicense) {
+      console.error("No primary license found when confirming license status change");
+      setError("Failed to change license status: No license found");
+      return;
+    }
+    handleLicenseToggleStatus(note.trim() || undefined, actionType);
   };
 
   const primaryLicense = useMemo(() => licenses[0] ?? null, [licenses]);
@@ -537,52 +562,55 @@ export default function ClientDetailComponent({
                   License Information
                 </h2>
               </div>
-              <div className="flex items-center gap-2 relative">
+              <div className="flex items-center gap-2">
                 {primaryLicense && (
                   <>
                     <StatusBadge status={primaryLicense.status} />
-                    <div className="relative">
-                      <button
-                        onClick={() => setShowLicenseMenu(!showLicenseMenu)}
-                        disabled={updatingLicense}
-                        className="px-3 py-1 text-xs rounded-lg font-medium bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
-                      >
-                        <MoreVertical className="w-3 h-3" />
-                        <span>Actions</span>
-                      </button>
-                      {showLicenseMenu && (
+                    <div className="flex items-center gap-2">
+                      {primaryLicense.status === "active" && (
                         <>
-                          <div 
-                            className="fixed inset-0 z-10" 
-                            onClick={() => setShowLicenseMenu(false)}
-                          />
-                          <div className="absolute right-0 mt-1 w-40 bg-white dark:bg-gray-800 rounded-lg shadow-lg border border-gray-200 dark:border-gray-700 z-20 py-1">
-                            {primaryLicense.status !== "active" && (
-                              <button
-                                onClick={() => initiateLicenseStatusChange("activate")}
-                                className="w-full text-left px-3 py-2 text-xs text-green-700 dark:text-green-400 hover:bg-green-50 dark:hover:bg-green-900/20 transition-colors"
-                              >
-                                Activate
-                              </button>
-                            )}
-                            {primaryLicense.status !== "inactive" && (
-                              <button
-                                onClick={() => initiateLicenseStatusChange("deactivate")}
-                                className="w-full text-left px-3 py-2 text-xs text-orange-700 dark:text-orange-400 hover:bg-orange-50 dark:hover:bg-orange-900/20 transition-colors"
-                              >
-                                Deactivate
-                              </button>
-                            )}
-                            {primaryLicense.status !== "revoked" && (
-                              <button
-                                onClick={() => initiateLicenseStatusChange("revoke")}
-                                className="w-full text-left px-3 py-2 text-xs text-red-700 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
-                              >
-                                Revoke
-                              </button>
-                            )}
-                          </div>
+                          <button
+                            onClick={() => initiateLicenseStatusChange("deactivate")}
+                            disabled={updatingLicense}
+                            className="px-3 py-1 text-xs rounded-lg font-medium bg-orange-100 dark:bg-orange-900/30 hover:bg-orange-200 dark:hover:bg-orange-900/50 text-orange-700 dark:text-orange-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            Deactivate
+                          </button>
+                          <button
+                            onClick={() => initiateLicenseStatusChange("revoke")}
+                            disabled={updatingLicense}
+                            className="px-3 py-1 text-xs rounded-lg font-medium bg-red-100 dark:bg-red-900/30 hover:bg-red-200 dark:hover:bg-red-900/50 text-red-700 dark:text-red-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            Revoke
+                          </button>
                         </>
+                      )}
+                      {primaryLicense.status === "inactive" && (
+                        <>
+                          <button
+                            onClick={() => initiateLicenseStatusChange("activate")}
+                            disabled={updatingLicense}
+                            className="px-3 py-1 text-xs rounded-lg font-medium bg-green-100 dark:bg-green-900/30 hover:bg-green-200 dark:hover:bg-green-900/50 text-green-700 dark:text-green-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            Activate
+                          </button>
+                          <button
+                            onClick={() => initiateLicenseStatusChange("revoke")}
+                            disabled={updatingLicense}
+                            className="px-3 py-1 text-xs rounded-lg font-medium bg-red-100 dark:bg-red-900/30 hover:bg-red-200 dark:hover:bg-red-900/50 text-red-700 dark:text-red-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            Revoke
+                          </button>
+                        </>
+                      )}
+                      {primaryLicense.status === "revoked" && (
+                        <button
+                          onClick={() => initiateLicenseStatusChange("activate")}
+                          disabled={updatingLicense}
+                          className="px-3 py-1 text-xs rounded-lg font-medium bg-green-100 dark:bg-green-900/30 hover:bg-green-200 dark:hover:bg-green-900/50 text-green-700 dark:text-green-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          Activate
+                        </button>
                       )}
                     </div>
                   </>
@@ -766,15 +794,20 @@ export default function ClientDetailComponent({
                       </p>
                     )}
                     <div className="flex items-center justify-between mt-2 pt-2 border-t border-gray-200 dark:border-gray-700">
-                      <div className="flex gap-1.5">
+                      <div className="flex flex-wrap gap-1.5">
                         <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300 rounded">
                           {entry.entityType === "client" ? "Client" : "License"}
                         </span>
                         <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 bg-gray-200 dark:bg-gray-600 text-gray-700 dark:text-gray-300 rounded">
                           {entry.action.replace("_", " ")}
                         </span>
+                        {entry.createdBy && (
+                          <span className="text-[10px] text-gray-600 dark:text-gray-400">
+                            by <span className="font-medium text-gray-900 dark:text-gray-200">{entry.createdBy}</span>
+                          </span>
+                        )}
                       </div>
-                      <span className="text-[10px] text-gray-500 dark:text-gray-400">
+                      <span className="text-[10px] text-gray-500 dark:text-gray-400 whitespace-nowrap">
                         {formatDate(entry.createdAt?.toString())}
                       </span>
                     </div>
@@ -818,6 +851,7 @@ export default function ClientDetailComponent({
         isOpen={showLicenseNoteDialog}
         onClose={() => {
           setShowLicenseNoteDialog(false);
+          licenseActionTypeRef.current = null;
           setLicenseActionType(null);
         }}
         onConfirm={handleLicenseNoteConfirm}

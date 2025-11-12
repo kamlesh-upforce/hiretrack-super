@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import Client from "../../../models/client";
 import History from "../../../models/history";
 import { connectToDatabase } from "@/lib/db";
+import { getAdminNameFromRequest } from "@/lib/getAdminFromRequest";
 
 // POST: Create a new client
 export async function POST(req: Request) {
@@ -29,6 +30,9 @@ export async function POST(req: Request) {
     });
     await newClient.save();
 
+    // Get admin name from token
+    const adminName = await getAdminNameFromRequest();
+
     // Log history for client creation
     await History.create({
       entityType: "client",
@@ -37,6 +41,7 @@ export async function POST(req: Request) {
       description: `Client created: ${name || email}`,
       newValue: "active",
       notes: notes || undefined,
+      createdBy: adminName || undefined,
     });
 
     return NextResponse.json({

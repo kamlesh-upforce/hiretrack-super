@@ -5,7 +5,7 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
 const JWT_SECRET = process.env.JWT_SECRET || "dev-secret-change";
-const COOKIE_NAME = process.env.COOKIE_NAME || "admin_token";
+export const COOKIE_NAME = process.env.COOKIE_NAME || "admin_token";
 
 // Create a function to get the secret key for jose
 // This ensures we create a new TextEncoder each time, which is safer for Edge Runtime

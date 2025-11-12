@@ -3,6 +3,7 @@ import License from "../../../models/license";
 import History from "../../../models/history";
 import { connectToDatabase } from "@/lib/db";
 import { Types } from "mongoose";
+import { getAdminNameFromRequest } from "@/lib/getAdminFromRequest";
 
 // PATCH: Toggle license status (activate/inactivate/revoke)
 export async function PATCH(req: Request) {
@@ -55,6 +56,9 @@ export async function PATCH(req: Request) {
       { new: true }
     );
 
+    // Get admin name from token
+    const adminName = await getAdminNameFromRequest();
+
     // Log history for license status change
     await History.create({
       entityType: "license",
@@ -64,6 +68,7 @@ export async function PATCH(req: Request) {
       oldValue: oldStatus,
       newValue: newStatus,
       notes: notes || undefined,
+      createdBy: adminName || undefined,
     });
 
     return NextResponse.json({
