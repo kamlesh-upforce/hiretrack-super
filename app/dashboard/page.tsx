@@ -4,7 +4,6 @@ import React, { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { Users, Key, CheckCircle, XCircle } from "lucide-react";
 import { IClient } from "../models/client";
-import { ILicense } from "../models/license";
 import ServerDataTable, { Column } from "../components/tables/ServerDataTable";
 import StatsCard from "../components/ui/StatsCard";
 import ErrorMessage from "../components/ui/ErrorMessage";
@@ -41,29 +40,23 @@ export default function Dashboard() {
         setError("");
 
         // Fetch stats (we'll get totals from paginated responses)
-        const [clientsResponse, licensesResponse] = await Promise.all([
-          api.get<PaginatedResponse<IClient>>(
-            "/api/client/read?page=1&limit=1"
-          ),
-          api.get<PaginatedResponse<ILicense>>(
-            "/api/license/read?page=1&limit=1"
-          ),
-        ]);
+        const clientsResponse = await api.get<PaginatedResponse<IClient>>(
+          "/api/client/read?page=1&limit=1"
+        );
 
         // Get total counts from pagination
-        const totalClients =
-          clientsResponse.pagination?.total || 0;
-        const totalLicenses =
-          licensesResponse.pagination?.total || 0;
+        const totalClients = clientsResponse.pagination?.total || 0;
 
-        // Fetch all licenses to calculate active count
-        // We'll get a large sample to count active licenses
-        const allLicensesResponse = await api.get<PaginatedResponse<ILicense>>(
-          "/api/license/read?page=1&limit=1000"
+        // Fetch all clients to calculate license stats
+        const allClientsResponse = await api.get<PaginatedResponse<IClient & { licenseKey?: string | null; licenseStatus?: string | null }>>(
+          "/api/client/read?page=1&limit=1000"
         );
-        const activeLicenses = allLicensesResponse.data?.filter(
-          (l) => l.status === "active"
-        ).length || 0;
+        
+        const clientsWithLicenses = allClientsResponse.data || [];
+        const totalLicenses = clientsWithLicenses.filter(c => (c as any).licenseKey).length;
+        const activeLicenses = clientsWithLicenses.filter(
+          (c) => (c as any).licenseStatus === "active"
+        ).length;
 
         setStats({
           totalClients,
@@ -103,62 +96,6 @@ export default function Dashboard() {
     []
   );
 
-  // Fetch licenses function for ServerDataTable
-  const fetchLicenses = useCallback(
-    async (params: { page: number; limit: number; search: string }) => {
-      const queryParams = new URLSearchParams({
-        page: params.page.toString(),
-        limit: params.limit.toString(),
-      });
-
-      if (params.search) {
-        queryParams.append("search", params.search);
-      }
-
-      const response = await api.get<PaginatedResponse<ILicense>>(
-        `/api/license/read?${queryParams.toString()}`
-      );
-
-      return response;
-    },
-    []
-  );
-
-  const handleRevokeLicense = async (license: ILicense) => {
-    if (
-      !confirm(
-        `Are you sure you want to revoke license ${license.licenseKey}? This action cannot be undone.`
-      )
-    ) {
-      return;
-    }
-
-    try {
-      await api.post("/api/license/revoke", {
-        licenseKey: license.licenseKey,
-      });
-
-      // Refresh stats
-      const statsResponse = await api.get<PaginatedResponse<ILicense>>(
-        "/api/license/read?page=1&limit=1000"
-      );
-      const activeLicenses = statsResponse.data?.filter(
-        (l) => l.status === "active"
-      ).length || 0;
-
-      setStats((prev) => ({
-        ...prev,
-        activeLicenses,
-        inactiveLicenses: prev.totalLicenses - activeLicenses,
-      }));
-
-      // Show success message or refresh the table
-      alert("License revoked successfully");
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "Failed to revoke license");
-    }
-  };
-
   const [clientRefreshKey, setClientRefreshKey] = useState(0);
 
   const handleToggleClientStatus = async (client: IClient) => {
@@ -197,7 +134,7 @@ export default function Dashboard() {
   };
 
   // Define columns for clients table
-  const clientColumns: Column<IClient>[] = [
+  const clientColumns: Column<IClient & { licenseKey?: string | null; licenseStatus?: string | null; installedVersion?: string | null }>[] = [
     {
       key: "name",
       header: "Name",
@@ -218,19 +155,39 @@ export default function Dashboard() {
     },
     {
       key: "status",
-      header: "Status",
+      header: "Client Status",
       sortable: false,
       render: (client) => (
         <StatusBadge status={client.status || "active"} />
       ),
     },
     {
-      key: "createdAt",
-      header: "Created",
+      key: "licenseKey",
+      header: "License Key",
       sortable: false,
       render: (client) => (
-        <span className="text-sm text-gray-500 dark:text-gray-400">
-          {formatDate(client.createdAt?.toString())}
+        <span className="font-mono text-sm text-gray-900 dark:text-gray-100">
+          {(client as any).licenseKey || "N/A"}
+        </span>
+      ),
+    },
+    {
+      key: "licenseStatus",
+      header: "License Status",
+      sortable: false,
+      render: (client) => {
+        const licenseStatus = (client as any).licenseStatus;
+        if (!licenseStatus) return <span className="text-gray-500 dark:text-gray-400">N/A</span>;
+        return <StatusBadge status={licenseStatus} />;
+      },
+    },
+    {
+      key: "installedVersion",
+      header: "Installed Version",
+      sortable: false,
+      render: (client) => (
+        <span className="text-sm text-gray-600 dark:text-gray-400">
+          {(client as any).installedVersion || "N/A"}
         </span>
       ),
     },
@@ -239,111 +196,21 @@ export default function Dashboard() {
       header: "Actions",
       className: "text-right",
       render: (client) => (
-        <div className="flex justify-end space-x-2">
+        <div className="flex justify-end">
           <button
             onClick={(e) => {
               e.stopPropagation();
               router.push(`/dashboard/clients/${client._id}`);
             }}
-            className="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 font-medium text-sm transition-colors"
+            className="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 font-medium text-sm transition-colors px-3 py-1 rounded hover:bg-blue-50 dark:hover:bg-blue-900/20"
           >
             View
-          </button>
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              handleToggleClientStatus(client);
-            }}
-            className={`font-medium text-sm transition-colors ${
-              (client.status || "active") === "active"
-                ? "text-orange-600 dark:text-orange-400 hover:text-orange-800 dark:hover:text-orange-300"
-                : "text-green-600 dark:text-green-400 hover:text-green-800 dark:hover:text-green-300"
-            }`}
-            title={(client.status || "active") === "active" ? "Deactivate client" : "Activate client"}
-          >
-            {(client.status || "active") === "active" ? "Deactivate" : "Activate"}
           </button>
         </div>
       ),
     },
   ];
 
-  // Define columns for licenses table
-  const licenseColumns: Column<ILicense>[] = [
-    {
-      key: "licenseKey",
-      header: "License Key",
-      sortable: false,
-      render: (license) => (
-        <span className="font-mono text-sm text-gray-900 dark:text-gray-100">
-          {license.licenseKey}
-        </span>
-      ),
-    },
-    {
-      key: "email",
-      header: "Client Email",
-      sortable: false,
-      render: (license) => (
-        <span className="text-gray-600 dark:text-gray-400">{license.email}</span>
-      ),
-    },
-    {
-      key: "status",
-      header: "Status",
-      sortable: false,
-      render: (license) => <StatusBadge status={license.status} />,
-    },
-    {
-      key: "installedVersion",
-      header: "Version",
-      sortable: false,
-      render: (license) => (
-        <span className="text-sm text-gray-600 dark:text-gray-400">
-          {license.installedVersion || "N/A"}
-        </span>
-      ),
-    },
-    {
-      key: "createdAt",
-      header: "Created",
-      sortable: false,
-      render: (license) => (
-        <span className="text-sm text-gray-500 dark:text-gray-400">
-          {formatDate(license.createdAt?.toString())}
-        </span>
-      ),
-    },
-    {
-      key: "actions",
-      header: "Actions",
-      className: "text-right",
-      render: (license) => (
-        <div className="flex justify-end space-x-3">
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              router.push(`/dashboard/licenses/${license._id}`);
-            }}
-            className="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 font-medium text-sm"
-          >
-            View
-          </button>
-          {license.status !== "revoked" && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                handleRevokeLicense(license);
-              }}
-              className="text-red-600 dark:text-red-400 hover:text-red-800 dark:hover:text-red-300 font-medium text-sm"
-            >
-              Revoke
-            </button>
-          )}
-        </div>
-      ),
-    },
-  ];
 
   return (
     <div className="container mx-auto px-4 sm:px-6 py-4 sm:py-6">
@@ -401,7 +268,7 @@ export default function Dashboard() {
       )}
 
       {/* Clients Section */}
-      <div className="mb-6 sm:mb-8">
+      <div>
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-4">
           <h2 className="text-xl sm:text-2xl font-semibold text-gray-900 dark:text-gray-100">
             Clients
@@ -427,26 +294,6 @@ export default function Dashboard() {
             router.push(`/dashboard/clients/${client._id}`)
           }
           emptyMessage="No clients found. Create your first client to get started."
-        />
-      </div>
-
-      {/* Licenses Section */}
-      <div>
-        <h2 className="text-xl sm:text-2xl font-semibold text-gray-900 dark:text-gray-100 mb-4">
-          Licenses
-        </h2>
-        <ServerDataTable
-          columns={licenseColumns}
-          loading={false}
-          searchable={true}
-          searchPlaceholder="Search licenses by key or email..."
-          paginated={true}
-          itemsPerPage={10}
-          fetchData={fetchLicenses}
-          onRowClick={(license) =>
-            router.push(`/dashboard/licenses/${license._id}`)
-          }
-          emptyMessage="No licenses found."
         />
       </div>
     </div>

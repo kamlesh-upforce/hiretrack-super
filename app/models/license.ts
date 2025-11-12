@@ -8,6 +8,7 @@ export interface ILicense extends Document {
   // allowedVersion: string;
   installedVersion?: string;
   // expiryDate?: Date;
+  lastValidatedAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -26,6 +27,7 @@ const LicenseSchema = new Schema<ILicense>(
     // allowedVersion: { type: String, required: true },
     installedVersion: { type: String },
     // expiryDate: { type: Date },
+    lastValidatedAt: { type: Date },
   },
   { timestamps: true }
 );

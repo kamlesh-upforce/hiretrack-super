@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { connectToDatabase } from "@/lib/db";
 import License from "@/app/models/license";
 import Client from "@/app/models/client";
+import History from "@/app/models/history";
 import { licenseRegisterSchema } from "@/lib/validators";
 import { generateLicenseKey } from "@/lib/license";
 
@@ -66,6 +67,16 @@ export async function POST(req: Request) {
 
     await newLicense.save();
 
+    // Log history for license creation
+    await History.create({
+      entityType: "license",
+      entityId: newLicense._id.toString(),
+      action: "license_created",
+      description: `License registered for ${email} with machine code ${machineCode}`,
+      newValue: "active",
+      notes: `Initial version: ${version || "N/A"}`,
+    });
+
     return NextResponse.json({
       message: "License registered successfully",
       license: {
@@ -77,10 +88,13 @@ export async function POST(req: Request) {
         installedVersion: newLicense.installedVersion,
       },
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Error registering license:", error);
     return NextResponse.json(
-      { error: "Internal server error", message: error.message },
+      { 
+        error: "Internal server error", 
+        message: error instanceof Error ? error.message : "Unknown error" 
+      },
       { status: 500 }
     );
   }

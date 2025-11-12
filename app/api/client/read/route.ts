@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import Client from "../../../models/client";
+import License from "../../../models/license";
 import { connectToDatabase } from "@/lib/db";
 import { Types } from "mongoose";
 
@@ -23,7 +24,19 @@ export async function GET(req: Request) {
           { status: 404 }
         );
       }
-      return NextResponse.json(client);
+      // Fetch latest license for this client
+      const license = await License.findOne({ email: client.email })
+        .sort({ createdAt: -1 })
+        .limit(1);
+      
+      const clientWithLicense = {
+        ...client.toObject(),
+        licenseKey: license?.licenseKey || null,
+        licenseStatus: license?.status || null,
+        installedVersion: license?.installedVersion || null,
+      };
+      
+      return NextResponse.json(clientWithLicense);
     }
 
     if (id) {
@@ -34,7 +47,19 @@ export async function GET(req: Request) {
           { status: 404 }
         );
       }
-      return NextResponse.json(client);
+      // Fetch latest license for this client
+      const license = await License.findOne({ email: client.email })
+        .sort({ createdAt: -1 })
+        .limit(1);
+      
+      const clientWithLicense = {
+        ...client.toObject(),
+        licenseKey: license?.licenseKey || null,
+        licenseStatus: license?.status || null,
+        installedVersion: license?.installedVersion || null,
+      };
+      
+      return NextResponse.json(clientWithLicense);
     }
 
     // Build query for search
@@ -58,11 +83,35 @@ export async function GET(req: Request) {
       .skip(skip)
       .limit(limit);
 
+    // Fetch license information for all clients
+    const clientEmails = clients.map((c) => c.email);
+    const licenses = await License.find({ email: { $in: clientEmails } })
+      .sort({ createdAt: -1 });
+
+    // Group licenses by email and get the latest one for each client
+    const licenseMap = new Map<string, typeof licenses[0]>();
+    licenses.forEach((license) => {
+      if (!licenseMap.has(license.email)) {
+        licenseMap.set(license.email, license);
+      }
+    });
+
+    // Add license information to each client
+    const clientsWithLicenses = clients.map((client) => {
+      const license = licenseMap.get(client.email);
+      return {
+        ...client.toObject(),
+        licenseKey: license?.licenseKey || null,
+        licenseStatus: license?.status || null,
+        installedVersion: license?.installedVersion || null,
+      };
+    });
+
     // Always return paginated response if page parameter is provided
     // Otherwise return array for backward compatibility
     if (searchParams.has("page")) {
       return NextResponse.json({
-        data: clients,
+        data: clientsWithLicenses,
         pagination: {
           page,
           limit,
@@ -73,7 +122,7 @@ export async function GET(req: Request) {
     }
 
     // Backward compatibility: return array
-    return NextResponse.json(clients);
+    return NextResponse.json(clientsWithLicenses);
   } catch (error) {
     console.error("Error retrieving clients:", error);
     return NextResponse.json(

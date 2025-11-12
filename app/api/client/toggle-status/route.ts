@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import Client from "../../../models/client";
+import License from "../../../models/license";
+import History from "../../../models/history";
 import { connectToDatabase } from "@/lib/db";
 import { Types } from "mongoose";
 
@@ -7,7 +9,7 @@ import { Types } from "mongoose";
 export async function PATCH(req: Request) {
   try {
     await connectToDatabase();
-    const { _id, status } = await req.json();
+    const { _id, status, notes } = await req.json();
 
     if (!_id) {
       return NextResponse.json(
@@ -31,7 +33,8 @@ export async function PATCH(req: Request) {
     }
 
     // Toggle status if not provided, or set to provided status
-    const newStatus = status || (client.status === "active" ? "deactivated" : "active");
+    const oldStatus = client.status || "active";
+    const newStatus = status || (oldStatus === "active" ? "deactivated" : "active");
 
     // Update client status
     const updatedClient = await Client.findOneAndUpdate(
@@ -40,6 +43,47 @@ export async function PATCH(req: Request) {
       { new: true }
     );
 
+    // Log history for client status change
+    await History.create({
+      entityType: "client",
+      entityId: _id.toString(),
+      action: "status_changed",
+      description: `Client status changed from ${oldStatus} to ${newStatus}`,
+      oldValue: oldStatus,
+      newValue: newStatus,
+      notes: notes || undefined,
+    });
+
+    // If client is being deactivated, also deactivate all licenses associated with their email
+    if (newStatus === "deactivated") {
+      const licensesToUpdate = await License.find({ email: client.email });
+      const updatedLicenses = await License.updateMany(
+        { email: client.email },
+        { status: "inactive" }
+      );
+
+      // Log history for each license that was deactivated
+      for (const license of licensesToUpdate) {
+        if (license.status !== "inactive") {
+          await History.create({
+            entityType: "license",
+            entityId: license._id.toString(),
+            action: "status_changed",
+            description: `License deactivated due to client deactivation`,
+            oldValue: license.status,
+            newValue: "inactive",
+            notes: `Automatically deactivated when client ${client.email} was deactivated`,
+          });
+        }
+      }
+      
+      return NextResponse.json({
+        message: `Client deactivated successfully. ${updatedLicenses.modifiedCount} license(s) deactivated.`,
+        client: updatedClient,
+        licensesUpdated: updatedLicenses.modifiedCount,
+      });
+    }
+    
     return NextResponse.json({
       message: `Client ${newStatus === "active" ? "activated" : "deactivated"} successfully`,
       client: updatedClient,

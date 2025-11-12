@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import Client from "../../../models/client";
+import History from "../../../models/history";
 import { connectToDatabase } from "@/lib/db";
 
 // POST: Create a new client
@@ -27,6 +28,16 @@ export async function POST(req: Request) {
       currentVersion: null,
     });
     await newClient.save();
+
+    // Log history for client creation
+    await History.create({
+      entityType: "client",
+      entityId: newClient._id.toString(),
+      action: "client_created",
+      description: `Client created: ${name || email}`,
+      newValue: "active",
+      notes: notes || undefined,
+    });
 
     return NextResponse.json({
       message: "Client created successfully",

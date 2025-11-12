@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import { connectToDatabase } from "@/lib/db";
 import License from "@/app/models/license";
+import History from "@/app/models/history";
 import { licenseUpdateSchema } from "@/lib/validators";
-import { generateLicenseKey } from "@/lib/license";
+import { generateLicenseKey, verifyLicenseKey } from "@/lib/license";
 import Client from "@/app/models/client";
 
 // PATCH: Update license details
@@ -31,6 +32,7 @@ export async function PATCH(req: Request) {
       ...updateData,
       licenseKey,
     });
+    
     if (!validationResult.success) {
       return NextResponse.json(
         {
@@ -40,7 +42,17 @@ export async function PATCH(req: Request) {
         { status: 400 }
       );
     }
+
     if (updateData.email) {
+      const validateLicense = verifyLicenseKey(licenseKey, updateData?.email, updateData?.machineCode);
+      if (!validateLicense.valid) {
+        return NextResponse.json(
+          {
+            error: validateLicense.reason || "Invalid license key",
+          },
+          { status: 400 }
+        );
+      }
       // Check if a client exists with this email in the Client collection
       const existingClient = await Client.findOne({ email: updateData.email });
       if (!existingClient || existingClient.status === "deactivated") {
@@ -53,8 +65,13 @@ export async function PATCH(req: Request) {
         );
       }
     }
+    // Find the license first to get old values
+    const oldLicense = await License.findOne({ licenseKey });
+    if (!oldLicense) {
+      return NextResponse.json({ error: "License not found" }, { status: 404 });
+    }
+
     // Find and update the license
-    // Update the license
     const updatedLicense = await License.findOneAndUpdate(
       { licenseKey },
       updateData,
@@ -62,6 +79,40 @@ export async function PATCH(req: Request) {
     );
 
     if (updatedLicense) {
+      // Log history for status changes
+      if (updateData.status && oldLicense.status !== updateData.status) {
+        await History.create({
+          entityType: "license",
+          entityId: updatedLicense._id.toString(),
+          action: "status_changed",
+          description: `License status changed from ${oldLicense.status} to ${updateData.status}`,
+          oldValue: oldLicense.status,
+          newValue: updateData.status,
+        });
+      }
+
+      // Log history for other changes
+      if (updateData.email && oldLicense.email !== updateData.email) {
+        await History.create({
+          entityType: "license",
+          entityId: updatedLicense._id.toString(),
+          action: "email_changed",
+          description: `License email changed from ${oldLicense.email} to ${updateData.email}`,
+          oldValue: oldLicense.email,
+          newValue: updateData.email,
+        });
+      }
+
+      if (updateData.installedVersion && oldLicense.installedVersion !== updateData.installedVersion) {
+        await History.create({
+          entityType: "license",
+          entityId: updatedLicense._id.toString(),
+          action: "version_updated",
+          description: `Installed version updated from ${oldLicense.installedVersion || "N/A"} to ${updateData.installedVersion}`,
+          oldValue: oldLicense.installedVersion || null,
+          newValue: updateData.installedVersion,
+        });
+      }
       // Generate a new license key (assuming generateLicenseKey is available)
       // You may need to import generateLicenseKey from your license utility
       // e.g., import { generateLicenseKey } from "@/lib/license";

@@ -1,28 +1,70 @@
 import crypto from "crypto";
 import License from "@/app/models/license";
+import ValidationHistory from "@/app/models/validationHistory";
 import { connectToDatabase } from "./db";
 
-const LICENSE_SECRET =
-  process.env.LICENSE_SECRET || "license-secret-change-in-production";
 
 // Generate a unique license key
 export function generateLicenseKey(email: string, machineCode: string): string {
   const secret = process.env.LICENSE_SECRET || "development-secret";
+
+
+  // Add cryptographically random salt (nonce)
+  const nonce = crypto.randomBytes(8).toString("hex"); // 16 hex chars
+  
   const hmac = crypto.createHmac("sha256", secret);
-  hmac.update(`${email}:${machineCode}`);
+  // hmac.update(`${email}:${machineCode}`);
+  hmac.update(`${email}:${machineCode}:${nonce}`);
   const digest = hmac.digest("hex");
   // Format in blocks for readability XXXX-XXXX-...
-  return digest
-    .substring(0, 32)
-    .toUpperCase()
-    .match(/.{1,4}/g)!
-    .join("-");
+  // Compose key = nonce + truncated digest
+  const raw = `${nonce}${digest.slice(0, 24)}`.toUpperCase(); // shorter key, still strong
+
+  // Format into XXXX-XXXX-... blocks for readability
+  return raw.match(/.{1,4}/g)!.join("-");
 }
 
 export function safeJson<T>(value: unknown): T {
   return value as T;
 }
 
+
+/**
+ * Verify a given license key.
+ * Returns { valid: boolean, reason?: string, nonce?: string }
+ */
+export function verifyLicenseKey(
+  key: string,
+  email: string,
+  machineCode: string
+): { valid: boolean; reason?: string; nonce?: string } {
+  if (!key) return { valid: false, reason: "no key provided" };
+  if (!email || !machineCode) return { valid: false, reason: "email/machineCode missing" };
+
+  const raw = key.replace(/-/g, "").toLowerCase();
+  const secret = process.env.LICENSE_SECRET || "development-secret";
+  // Nonce = first 16 hex chars (8 bytes)
+  const nonce = raw.slice(0, 16);
+  const signature = raw.slice(16);
+
+  if (raw.length < 40) {
+    return { valid: false, reason: "invalid key length" };
+  }
+
+  // Recompute expected signature
+  const hmac = crypto.createHmac("sha256", secret);
+  hmac.update(`${email}:${machineCode}:${nonce}`);
+  const expectedSig = hmac.digest("hex").slice(0, 24);
+
+  // Constant-time comparison
+  const a = Buffer.from(signature, "hex");
+  const b = Buffer.from(expectedSig, "hex");
+  const equal = a.length === b.length && crypto.timingSafeEqual(a, b);
+
+  return equal
+    ? { valid: true, nonce }
+    : { valid: false, reason: "signature mismatch", nonce };
+}
 // Validate if a license is valid based on multiple criteria
 export async function validateLicense(
   licenseKey: string,
@@ -32,31 +74,77 @@ export async function validateLicense(
   valid: boolean;
   asset?: string;
   message?: string;
-  licenseData?: any;
+  licenseData?: unknown;
 }> {
-  try {
-    await connectToDatabase();
+  let license: typeof License.prototype | null = null;
+  let validationResult: {
+    valid: boolean;
+    asset?: string;
+    message?: string;
+  } = {
+    valid: false,
+    message: "",
+  };
 
+  try {
+   
+    await connectToDatabase();
+    
     // Find the license in the database
-    const license = await License.findOne({ licenseKey });
+    license = await License.findOne({ licenseKey });
 
     if (!license) {
-      return { valid: false, message: "License not found" };
+      validationResult = { valid: false, message: "License not found" };
+      // Log failed validation
+      await ValidationHistory.create({
+        licenseKey,
+        email: "", // We don't have email at this point
+        machineCode,
+        valid: false,
+        message: "License not found",
+        installedVersion,
+      });
+      return validationResult;
     }
-
+    const validateLicense = verifyLicenseKey(licenseKey, license.email, machineCode);
+    if (!validateLicense.valid) {
+      return { valid: false, message: validateLicense.reason || "Invalid license key" };
+    }
     // Check if the license is active
     if (license.status !== "active") {
-      return { valid: false, message: `License is ${license.status}` };
+      validationResult = { valid: false, message: `License is ${license.status}` };
+      // Log failed validation
+      await ValidationHistory.create({
+        licenseKey,
+        email: license.email,
+        machineCode,
+        valid: false,
+        message: `License is ${license.status}`,
+        installedVersion,
+        licenseId: license._id.toString(),
+      });
+      return validationResult;
     }
 
     // If machine code is already set, check if it matches
     if (license.machineCode && license.machineCode !== machineCode) {
-      return {
+      validationResult = {
         valid: false,
         message: "License is bound to a different machine",
       };
+      // Log failed validation
+      await ValidationHistory.create({
+        licenseKey,
+        email: license.email,
+        machineCode,
+        valid: false,
+        message: "License is bound to a different machine",
+        installedVersion,
+        licenseId: license._id.toString(),
+      });
+      return validationResult;
     }
-
+    
     // If no machine code is set yet, update it
     if (!license.machineCode) {
       license.machineCode = machineCode;
@@ -66,8 +154,21 @@ export async function validateLicense(
     // Update installed version if provided
     if (installedVersion && installedVersion !== license.installedVersion) {
       license.installedVersion = installedVersion;
-      await license.save();
     }
+
+    // Update last validated timestamp
+    license.lastValidatedAt = new Date();
+    await license.save();
+
+    // Log successful validation
+    await ValidationHistory.create({
+      licenseKey,
+      email: license.email,
+      machineCode,
+      valid: true,
+      installedVersion,
+      licenseId: license._id.toString(),
+    });
 
     // Fetch the asset from GitHub releases
     let assetUrl: string | undefined = undefined;
@@ -78,20 +179,23 @@ export async function validateLicense(
       if (!response.ok) {
         throw new Error("Failed to fetch release data from GitHub");
       }
-      const releases = await response.json();
+      const releases = await response.json() as Array<{
+        tag_name: string;
+        assets?: Array<{ browser_download_url?: string }>;
+      }>;
 
-      let release;
+      let release: typeof releases[0] | undefined;
       if (installedVersion) {
         // Try to find a release with tag_name matching v{installedVersion} or {installedVersion}
         release =
           releases.find(
-            (r: any) =>
+            (r) =>
               r.tag_name === installedVersion ||
               r.tag_name === `v${installedVersion}` ||
               r.tag_name === installedVersion.replace(/^v/, "")
           ) ||
           releases.find(
-            (r: any) =>
+            (r) =>
               r.tag_name === `v${installedVersion}` ||
               r.tag_name === installedVersion
           );
@@ -111,29 +215,36 @@ export async function validateLicense(
         release.assets.length > 0
       ) {
         // Find the first asset with a browser_download_url
-        const asset = release.assets.find((a: any) => a.browser_download_url);
+        const asset = release.assets.find((a) => a.browser_download_url);
         if (asset) {
           assetUrl = asset.browser_download_url;
         }
       }
-    } catch (err) {
+    } catch {
       // If fetching asset fails, just don't include asset url
       assetUrl = undefined;
     }
 
-    return {
+    validationResult = {
       valid: true,
       asset: assetUrl || "NOT FOUND",
-      // licenseData: {
-      //   licenseKey: license.licenseKey,
-      //   email: license.email,
-      //   status: license.status,
-      //   machineCode: license.machineCode,
-      //   allowedVersion: license.allowedVersion,
-      //   installedVersion: license.installedVersion,
-      // },
     };
-  } catch (error) {
+    return validationResult;
+  } catch {
+    // Log error validation
+    try {
+      await ValidationHistory.create({
+        licenseKey,
+        email: license?.email || "",
+        machineCode,
+        valid: false,
+        message: "Error validating license",
+        installedVersion,
+        licenseId: license?._id?.toString(),
+      });
+    } catch {
+      // Ignore history logging errors
+    }
     return { valid: false, message: "Error validating license" };
   }
 }
