@@ -73,7 +73,8 @@ get_machine_code() {
             hostname | sha256sum | awk '{print $1}'
         fi
     elif [[ "$OS_TYPE" == "darwin" ]]; then
-        hostname | shasum -a 256 | awk '{print $1}'
+        # hostname | shasum -a 256 | awk '{print $1}'
+        system_profiler SPHardwareDataType | awk '/Hardware UUID/ { print $3; }'
     else
         echo "❌ Unsupported OS: $OS_TYPE"
         exit 1
@@ -2795,8 +2796,9 @@ restart_pm2_service() {
 setup_cron() {
     local OS_TYPE=$(uname | tr '[:upper:]' '[:lower:]')
     local CRON_NAME="hiretrack-autoupdate"
+    local CRON_PATH="/root/.hiretrack/installer.sh"
     local SNAPSHOT_CRON_NAME="hiretrack-snapshot"
-    local CRON_ENTRY="0 2 * * * PATH=/usr/local/bin:/usr/bin:/bin bash $SCRIPT_PATH --update >> $CRON_LOG_FILE 2>&1"
+    local CRON_ENTRY="0 2 * * * PATH=/usr/local/bin:/usr/bin:/bin $CRON_PATH --update >> $CRON_LOG_FILE 2>&1"
     local SNAPSHOT_CRON_ENTRY="0 2 * * * PATH=/usr/local/bin:/usr/bin:/bin node $SNAPSHOT_SCRIPT >> $SNAPSHOT_LOG_FILE 2>&1"
 
     if [[ "$OS_TYPE" == "linux" || "$OS_TYPE" == "darwin" ]]; then
