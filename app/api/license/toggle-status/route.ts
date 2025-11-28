@@ -5,7 +5,7 @@ import { connectToDatabase } from "@/lib/db";
 import { Types } from "mongoose";
 import { getAdminNameFromRequest } from "@/lib/getAdminFromRequest";
 
-// PATCH: Toggle license status (activate/inactivate/revoke)
+// PATCH: Toggle license status (activate/inactivate)
 export async function PATCH(req: Request) {
   try {
     await connectToDatabase();
@@ -32,20 +32,27 @@ export async function PATCH(req: Request) {
       return NextResponse.json({ error: "License not found" }, { status: 404 });
     }
 
+    if (license.status === "revoked") {
+      return NextResponse.json(
+        { error: "Revoked licenses cannot change status" },
+        { status: 400 }
+      );
+    }
+
     // Determine new status
     const oldStatus = license.status;
     let newStatus: string;
     
     if (status) {
-      if (!["active", "inactive", "revoked"].includes(status)) {
+      if (!["active", "inactive"].includes(status)) {
         return NextResponse.json(
-          { error: "Status must be 'active', 'inactive', or 'revoked'" },
+          { error: "Status must be 'active', 'inactive'" },
           { status: 400 }
         );
       }
       newStatus = status;
     } else {
-      // Toggle between active and inactive (don't auto-toggle to revoked)
+      // Toggle between active and inactive
       newStatus = oldStatus === "active" ? "inactive" : "active";
     }
 
@@ -72,7 +79,7 @@ export async function PATCH(req: Request) {
     });
 
     return NextResponse.json({
-      message: `License ${newStatus === "active" ? "activated" : newStatus === "inactive" ? "deactivated" : "revoked"} successfully`,
+      message: `License ${newStatus === "active" ? "activated" : "deactivated" } successfully`,
       license: updatedLicense,
     });
   } catch (error) {

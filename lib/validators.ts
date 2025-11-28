@@ -27,7 +27,7 @@ export const licenseCreateSchema = z.object({
 });
 
 export const licenseUpdateSchema = z.object({
-  // status: z.enum(["active", "inactive", "revoked"]).optional(),
+  // status: z.enum(["active", "inactive"]).optional(),
   // allowedVersion: z.string().optional(),
   // expiryDate: z.union([
   //   z.string().datetime(),

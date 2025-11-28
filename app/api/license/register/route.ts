@@ -31,7 +31,7 @@ export async function POST(req: Request) {
     const existingLicense = await License.findOne({
       $or: [{ email }, { machineCode }],
     });
-    if (existingLicense) {
+    if (existingLicense && existingLicense.status !== "revoked") {
       return NextResponse.json(
         {
           error: "A license for this email and machine code already exists.",

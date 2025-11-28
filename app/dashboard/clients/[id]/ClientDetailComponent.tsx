@@ -2,7 +2,20 @@
 
 import React, { useMemo, useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, Edit, Clock, Key, User, Mail, Calendar, FileText, Cpu, CheckCircle, XCircle } from "lucide-react";
+import {
+  ArrowLeft,
+  Edit,
+  Clock,
+  Key,
+  User,
+  Mail,
+  Calendar,
+  FileText,
+  Cpu,
+  CheckCircle,
+  XCircle,
+  ShieldOff,
+} from "lucide-react";
 import { IClient } from "@/app/models/client";
 import { ILicense } from "@/app/models/license";
 import LoadingSpinner from "@/app/components/ui/LoadingSpinner";
@@ -66,16 +79,22 @@ export default function ClientDetailComponent({
   const [client, setClient] = useState<IClient | null>(null);
   const [licenses, setLicenses] = useState<ILicense[]>([]);
   const [history, setHistory] = useState<IHistory[]>([]);
-  const [validationHistory, setValidationHistory] = useState<IValidationHistory[]>([]);
+  const [validationHistory, setValidationHistory] = useState<
+    IValidationHistory[]
+  >([]);
   const [loading, setLoading] = useState(true);
   const [updating, setUpdating] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [showNoteDialog, setShowNoteDialog] = useState(false);
   const [showLicenseNoteDialog, setShowLicenseNoteDialog] = useState(false);
+  const [showRevokeDialog, setShowRevokeDialog] = useState(false);
   const [updatingLicense, setUpdatingLicense] = useState(false);
-  const [licenseActionType, setLicenseActionType] = useState<"activate" | "deactivate" | "revoke" | null>(null);
-  const licenseActionTypeRef = useRef<"activate" | "deactivate" | "revoke" | null>(null);
+  const [revokingLicense, setRevokingLicense] = useState(false);
+  const [licenseActionType, setLicenseActionType] = useState<
+    "activate" | "deactivate" | null
+  >(null);
+  const licenseActionTypeRef = useRef<"activate" | "deactivate" | null>(null);
 
   useEffect(() => {
     const fetchClientDetails = async () => {
@@ -122,7 +141,9 @@ export default function ClientDetailComponent({
                 `/api/history/read?entityType=license&entityId=${licenseId}`
               )
             );
-            const licenseHistoryResults = await Promise.all(licenseHistoryPromises);
+            const licenseHistoryResults = await Promise.all(
+              licenseHistoryPromises
+            );
             licenseHistory = licenseHistoryResults.flat();
           } catch {
             // Ignore errors for license history
@@ -130,8 +151,9 @@ export default function ClientDetailComponent({
         }
 
         // Combine and sort all history
-        const allHistory = [...clientHistory, ...licenseHistory].sort((a, b) => 
-          new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+        const allHistory = [...clientHistory, ...licenseHistory].sort(
+          (a, b) =>
+            new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
         );
         setHistory(allHistory);
 
@@ -140,7 +162,9 @@ export default function ClientDetailComponent({
           const validationHistoryData = await api.get<IValidationHistory[]>(
             `/api/validation-history/read?email=${clientData?.email}&limit=50`
           );
-          setValidationHistory(Array.isArray(validationHistoryData) ? validationHistoryData : []);
+          setValidationHistory(
+            Array.isArray(validationHistoryData) ? validationHistoryData : []
+          );
         } catch {
           // If no validation history found, set empty array
           setValidationHistory([]);
@@ -177,7 +201,9 @@ export default function ClientDetailComponent({
       });
 
       // Refetch client data to get the updated status
-      const updatedClient = await api.get<IClient>(`/api/client/read?_id=${id}`);
+      const updatedClient = await api.get<IClient>(
+        `/api/client/read?_id=${id}`
+      );
       setClient(updatedClient);
       setSuccess(`Client ${action}d successfully`);
 
@@ -197,7 +223,7 @@ export default function ClientDetailComponent({
           `/api/history/read?entityType=client&entityId=${id}`
         );
         const clientHistory = Array.isArray(historyData) ? historyData : [];
-        
+
         // Also fetch license history
         if (licenses.length > 0) {
           const licenseIds = licenses
@@ -208,11 +234,14 @@ export default function ClientDetailComponent({
               `/api/history/read?entityType=license&entityId=${licenseId}`
             )
           );
-          const licenseHistoryResults = await Promise.all(licenseHistoryPromises);
+          const licenseHistoryResults = await Promise.all(
+            licenseHistoryPromises
+          );
           const licenseHistory = licenseHistoryResults.flat();
-          
-          const allHistory = [...clientHistory, ...licenseHistory].sort((a, b) => 
-            new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+
+          const allHistory = [...clientHistory, ...licenseHistory].sort(
+            (a, b) =>
+              new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
           );
           setHistory(allHistory);
         } else {
@@ -222,7 +251,9 @@ export default function ClientDetailComponent({
         // Ignore errors
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : `Failed to ${action} client`);
+      setError(
+        err instanceof Error ? err.message : `Failed to ${action} client`
+      );
     } finally {
       setUpdating(false);
     }
@@ -238,7 +269,76 @@ export default function ClientDetailComponent({
     handleToggleStatus(note.trim() || undefined);
   };
 
-  const handleLicenseToggleStatus = async (note?: string, actionType?: "activate" | "deactivate" | "revoke") => {
+  const refreshLicenseAndHistory = async () => {
+    if (!client) {
+      return;
+    }
+    try {
+      const refreshedLicenses = await api.get<ILicense[]>(
+        `/api/license/read?email=${client.email}`
+      );
+      const updatedLicenses = Array.isArray(refreshedLicenses)
+        ? refreshedLicenses
+        : [];
+      setLicenses(updatedLicenses);
+
+      const licenseIds = updatedLicenses
+        .map((l) => idToString(l._id))
+        .filter(Boolean);
+
+      let clientHistory: IHistory[] = [];
+      try {
+        const clientHistoryData = await api.get<IHistory[]>(
+          `/api/history/read?entityType=client&entityId=${id}`
+        );
+        clientHistory = Array.isArray(clientHistoryData)
+          ? clientHistoryData
+          : [];
+      } catch {
+        clientHistory = [];
+      }
+
+      if (licenseIds.length > 0) {
+        const licenseHistoryPromises = licenseIds.map((licenseId) =>
+          api.get<IHistory[]>(
+            `/api/history/read?entityType=license&entityId=${licenseId}`
+          )
+        );
+        const licenseHistoryResults = await Promise.all(
+          licenseHistoryPromises
+        );
+        const licenseHistory = licenseHistoryResults.flat();
+
+        const allHistory = [...clientHistory, ...licenseHistory].sort(
+          (a, b) =>
+            new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+        );
+        setHistory(allHistory);
+
+        try {
+          const validationHistoryData = await api.get<IValidationHistory[]>(
+            `/api/validation-history/read?email=${client.email}&limit=50`
+          );
+          setValidationHistory(
+            Array.isArray(validationHistoryData)
+              ? validationHistoryData
+              : []
+          );
+        } catch {
+          // Ignore validation history errors
+        }
+      } else {
+        setHistory(clientHistory);
+      }
+    } catch {
+      // Keep existing state if refresh fails
+    }
+  };
+
+  const handleLicenseToggleStatus = async (
+    note?: string,
+    actionType?: "activate" | "deactivate" 
+  ) => {
     if (!primaryLicense) {
       console.error("handleLicenseToggleStatus: No primary license");
       setError("No license found");
@@ -253,7 +353,7 @@ export default function ClientDetailComponent({
       return;
     }
 
-    let newStatus: "active" | "inactive" | "revoked";
+    let newStatus: "active" | "inactive";
     let action: string;
 
     switch (currentActionType) {
@@ -265,10 +365,6 @@ export default function ClientDetailComponent({
         newStatus = "inactive";
         action = "deactivate";
         break;
-      case "revoke":
-        newStatus = "revoked";
-        action = "revoke";
-        break;
       default:
         return;
     }
@@ -279,7 +375,12 @@ export default function ClientDetailComponent({
       setSuccess("");
 
       const licenseId = idToString(primaryLicense._id);
-      console.log("Changing license status:", { licenseId, newStatus, action: currentActionType, note });
+      console.log("Changing license status:", {
+        licenseId,
+        newStatus,
+        action: currentActionType,
+        note,
+      });
 
       const response = await api.patch("/api/license/toggle-status", {
         _id: licenseId,
@@ -289,69 +390,20 @@ export default function ClientDetailComponent({
 
       console.log("License status change response:", response);
 
-      // Refetch license data, history, and validation history
-      try {
-        const refreshedLicenses = await api.get<ILicense[]>(
-          `/api/license/read?email=${client?.email}`
-        );
-        const updatedLicenses = Array.isArray(refreshedLicenses) ? refreshedLicenses : [];
-        setLicenses(updatedLicenses);
-
-        // Refetch history for licenses
-        const licenseIds = updatedLicenses
-          .map((l) => idToString(l._id))
-          .filter(Boolean);
-        
-        if (licenseIds.length > 0) {
-          const licenseHistoryPromises = licenseIds.map((licenseId) =>
-            api.get<IHistory[]>(
-              `/api/history/read?entityType=license&entityId=${licenseId}`
-            )
-          );
-          const licenseHistoryResults = await Promise.all(licenseHistoryPromises);
-          const licenseHistory = licenseHistoryResults.flat();
-
-          // Also get client history
-          const clientHistoryData = await api.get<IHistory[]>(
-            `/api/history/read?entityType=client&entityId=${id}`
-          );
-          const clientHistory = Array.isArray(clientHistoryData) ? clientHistoryData : [];
-
-          const allHistory = [...clientHistory, ...licenseHistory].sort((a, b) => 
-            new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-          );
-          setHistory(allHistory);
-
-          // Refetch validation history
-          try {
-            const validationHistoryData = await api.get<IValidationHistory[]>(
-              `/api/validation-history/read?email=${client?.email}&limit=50`
-            );
-            setValidationHistory(Array.isArray(validationHistoryData) ? validationHistoryData : []);
-          } catch {
-            // Ignore validation history errors
-          }
-        } else {
-          // If no licenses, just get client history
-          const clientHistoryData = await api.get<IHistory[]>(
-            `/api/history/read?entityType=client&entityId=${id}`
-          );
-          const clientHistory = Array.isArray(clientHistoryData) ? clientHistoryData : [];
-          setHistory(clientHistory);
-        }
-      } catch {
-        // Keep previous licenses if fetch fails
-      }
-
+      await refreshLicenseAndHistory();
       setSuccess(`License ${action}d successfully`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : `Failed to ${action} license`);
+      setError(
+        err instanceof Error ? err.message : `Failed to ${action} license`
+      );
     } finally {
       setUpdatingLicense(false);
     }
   };
 
-  const initiateLicenseStatusChange = (actionType: "activate" | "deactivate" | "revoke") => {
+  const initiateLicenseStatusChange = (
+    actionType: "activate" | "deactivate" 
+  ) => {
     if (!primaryLicense) return;
     licenseActionTypeRef.current = actionType;
     setLicenseActionType(actionType);
@@ -366,19 +418,70 @@ export default function ClientDetailComponent({
     setLicenseActionType(null);
     // Call the handler with the captured action type
     if (!actionType) {
-      console.error("No action type found when confirming license status change");
+      console.error(
+        "No action type found when confirming license status change"
+      );
       setError("Failed to change license status: No action type specified");
       return;
     }
     if (!primaryLicense) {
-      console.error("No primary license found when confirming license status change");
+      console.error(
+        "No primary license found when confirming license status change"
+      );
       setError("Failed to change license status: No license found");
       return;
     }
     handleLicenseToggleStatus(note.trim() || undefined, actionType);
   };
 
-  const primaryLicense = useMemo(() => licenses[0] ?? null, [licenses]);
+  const initiateLicenseRevoke = () => {
+    if (!primaryLicense || primaryLicense.status === "revoked") {
+      return;
+    }
+    setShowRevokeDialog(true);
+  };
+
+  const handleLicenseRevoke = async (note?: string) => {
+    if (!primaryLicense) {
+      setError("No license found");
+      return;
+    }
+
+    try {
+      setRevokingLicense(true);
+      setError("");
+      setSuccess("");
+
+      await api.post("/api/license/revoke", {
+        licenseKey: primaryLicense.licenseKey,
+        reason: note || undefined,
+      });
+
+      await refreshLicenseAndHistory();
+      setSuccess("License revoked successfully");
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Failed to revoke license"
+      );
+    } finally {
+      setRevokingLicense(false);
+    }
+  };
+
+  const handleRevokeNoteConfirm = (note: string) => {
+    setShowRevokeDialog(false);
+    handleLicenseRevoke(note.trim() || undefined);
+  };
+
+  const primaryLicense = useMemo(() => {
+    const nonRevoked = licenses.find((license) => license.status !== "revoked");
+    return nonRevoked ?? licenses[0] ?? null;
+  }, [licenses]);
+
+  const revokedLicenses = useMemo(
+    () => licenses.filter((license) => license.status === "revoked"),
+    [licenses]
+  );
 
   if (loading) {
     return (
@@ -402,7 +505,9 @@ export default function ClientDetailComponent({
     return (
       <div className="container mx-auto px-4 py-8">
         <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 p-6">
-          <p className="text-gray-600 dark:text-gray-400 text-center">Client not found</p>
+          <p className="text-gray-600 dark:text-gray-400 text-center">
+            Client not found
+          </p>
         </div>
       </div>
     );
@@ -439,7 +544,11 @@ export default function ClientDetailComponent({
                 : "bg-green-500 hover:bg-green-600 text-white"
             } disabled:opacity-50 disabled:cursor-not-allowed`}
           >
-            {updating ? "Updating..." : (client.status || "active") === "active" ? "Deactivate" : "Activate"}
+            {updating
+              ? "Updating..."
+              : (client.status || "active") === "active"
+              ? "Deactivate"
+              : "Activate"}
           </button>
           <button
             onClick={() => router.push(`/dashboard/clients/edit/${client._id}`)}
@@ -566,53 +675,45 @@ export default function ClientDetailComponent({
                 {primaryLicense && (
                   <>
                     <StatusBadge status={primaryLicense.status} />
-                    <div className="flex items-center gap-2">
-                      {primaryLicense.status === "active" && (
-                        <>
+                    {primaryLicense.status !== "revoked" ? (
+                      <div className="flex items-center gap-2">
+                        {primaryLicense.status === "active" && (
                           <button
-                            onClick={() => initiateLicenseStatusChange("deactivate")}
+                            onClick={() =>
+                              initiateLicenseStatusChange("deactivate")
+                            }
                             disabled={updatingLicense}
                             className="px-3 py-1 text-xs rounded-lg font-medium bg-orange-100 dark:bg-orange-900/30 hover:bg-orange-200 dark:hover:bg-orange-900/50 text-orange-700 dark:text-orange-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                           >
                             Deactivate
                           </button>
+                        )}
+                        {primaryLicense.status === "inactive" && (
                           <button
-                            onClick={() => initiateLicenseStatusChange("revoke")}
-                            disabled={updatingLicense}
-                            className="px-3 py-1 text-xs rounded-lg font-medium bg-red-100 dark:bg-red-900/30 hover:bg-red-200 dark:hover:bg-red-900/50 text-red-700 dark:text-red-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                          >
-                            Revoke
-                          </button>
-                        </>
-                      )}
-                      {primaryLicense.status === "inactive" && (
-                        <>
-                          <button
-                            onClick={() => initiateLicenseStatusChange("activate")}
+                            onClick={() =>
+                              initiateLicenseStatusChange("activate")
+                            }
                             disabled={updatingLicense}
                             className="px-3 py-1 text-xs rounded-lg font-medium bg-green-100 dark:bg-green-900/30 hover:bg-green-200 dark:hover:bg-green-900/50 text-green-700 dark:text-green-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                           >
                             Activate
                           </button>
-                          <button
-                            onClick={() => initiateLicenseStatusChange("revoke")}
-                            disabled={updatingLicense}
-                            className="px-3 py-1 text-xs rounded-lg font-medium bg-red-100 dark:bg-red-900/30 hover:bg-red-200 dark:hover:bg-red-900/50 text-red-700 dark:text-red-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                          >
-                            Revoke
-                          </button>
-                        </>
-                      )}
-                      {primaryLicense.status === "revoked" && (
+                        )}
                         <button
-                          onClick={() => initiateLicenseStatusChange("activate")}
-                          disabled={updatingLicense}
-                          className="px-3 py-1 text-xs rounded-lg font-medium bg-green-100 dark:bg-green-900/30 hover:bg-green-200 dark:hover:bg-green-900/50 text-green-700 dark:text-green-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                          onClick={initiateLicenseRevoke}
+                          disabled={revokingLicense}
+                          className="inline-flex items-center gap-1 px-3 py-1 text-xs rounded-lg font-medium bg-red-100 dark:bg-red-900/30 hover:bg-red-200 dark:hover:bg-red-900/50 text-red-700 dark:text-red-300 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                         >
-                          Activate
+                          <ShieldOff className="w-3 h-3" />
+                          Revoke
                         </button>
-                      )}
-                    </div>
+                      </div>
+                    ) : (
+                      <span className="text-xs text-gray-500 dark:text-gray-400">
+                        Revoked on{" "}
+                        {formatDate(primaryLicense.revoked?.revokedAt?.toString())}
+                      </span>
+                    )}
                   </>
                 )}
               </div>
@@ -631,18 +732,24 @@ export default function ClientDetailComponent({
                 </div>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                   <div className="space-y-1">
-                    <div className="text-xs text-gray-500 dark:text-gray-400">Status</div>
+                    <div className="text-xs text-gray-500 dark:text-gray-400">
+                      Status
+                    </div>
                     <StatusBadge status={primaryLicense.status} />
                   </div>
                   <div className="space-y-1">
-                    <div className="text-xs text-gray-500 dark:text-gray-400">Version</div>
+                    <div className="text-xs text-gray-500 dark:text-gray-400">
+                      Version
+                    </div>
                     <p className="text-sm font-medium text-gray-900 dark:text-gray-100">
                       {primaryLicense.installedVersion || "N/A"}
                     </p>
                   </div>
                   {primaryLicense.machineCode && (
                     <div className="space-y-1 col-span-2 sm:col-span-1">
-                      <div className="text-xs text-gray-500 dark:text-gray-400">Machine Code</div>
+                      <div className="text-xs text-gray-500 dark:text-gray-400">
+                        Machine Code
+                      </div>
                       <p className="text-xs font-mono text-gray-900 dark:text-gray-100 break-all">
                         {primaryLicense.machineCode}
                       </p>
@@ -651,34 +758,113 @@ export default function ClientDetailComponent({
                 </div>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 pt-3 border-t border-gray-200 dark:border-gray-700">
                   <div className="space-y-1">
-                    <div className="text-xs text-gray-500 dark:text-gray-400">Created</div>
+                    <div className="text-xs text-gray-500 dark:text-gray-400">
+                      Created
+                    </div>
                     <p className="text-xs font-medium text-gray-900 dark:text-gray-100">
                       {formatDate(primaryLicense.createdAt?.toString())}
                     </p>
                   </div>
                   <div className="space-y-1">
-                    <div className="text-xs text-gray-500 dark:text-gray-400">Updated</div>
+                    <div className="text-xs text-gray-500 dark:text-gray-400">
+                      Updated
+                    </div>
                     <p className="text-xs font-medium text-gray-900 dark:text-gray-100">
                       {formatDate(primaryLicense.updatedAt?.toString())}
                     </p>
                   </div>
                   {primaryLicense.lastValidatedAt && (
                     <div className="space-y-1">
-                      <div className="text-xs text-gray-500 dark:text-gray-400">Last Validated</div>
+                      <div className="text-xs text-gray-500 dark:text-gray-400">
+                        Last Validated
+                      </div>
                       <p className="text-xs font-medium text-gray-900 dark:text-gray-100">
                         {formatDate(primaryLicense.lastValidatedAt?.toString())}
                       </p>
                     </div>
                   )}
                 </div>
+                {primaryLicense.status === "revoked" && primaryLicense.revoked && (
+                  <div className="mt-4 p-3 rounded-lg border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20">
+                    <p className="text-xs font-semibold text-red-700 dark:text-red-300 mb-1">
+                      Revocation Details
+                    </p>
+                    <div className="text-xs text-gray-700 dark:text-gray-200 space-y-1">
+                      <p>
+                        <span className="font-medium">Revoked On:</span>{" "}
+                        {formatDate(primaryLicense.revoked.revokedAt?.toString())}
+                      </p>
+                      {primaryLicense.revoked.reason && (
+                        <p>
+                          <span className="font-medium">Reason:</span>{" "}
+                          {primaryLicense.revoked.reason}
+                        </p>
+                      )}
+                      {primaryLicense.revoked.revokedBy && (
+                        <p>
+                          <span className="font-medium">By:</span>{" "}
+                          {primaryLicense.revoked.revokedBy.toString()}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
             ) : (
               <div className="text-center py-6 border border-dashed border-gray-300 dark:border-gray-600 rounded-lg bg-gray-50 dark:bg-gray-700/30">
                 <Key className="w-8 h-8 text-gray-400 dark:text-gray-500 mx-auto mb-2" />
-                <p className="text-sm font-medium text-gray-900 dark:text-gray-100">No License</p>
+                <p className="text-sm font-medium text-gray-900 dark:text-gray-100">
+                  No License
+                </p>
                 <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                   This client does not have a license yet
                 </p>
+              </div>
+            )}
+
+            {revokedLicenses.length > 0 && (
+              <div className="mt-6 pt-4 border-t border-gray-200 dark:border-gray-700">
+                <div className="flex items-center gap-2 mb-3">
+                  <ShieldOff className="w-4 h-4 text-red-500 dark:text-red-400" />
+                  <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                    Revoked Licenses ({revokedLicenses.length})
+                  </p>
+                </div>
+                <div className="space-y-3">
+                  {revokedLicenses.map((license) => (
+                    <div
+                      key={license._id?.toString() || license.licenseKey}
+                      className="border border-red-200 dark:border-red-800 rounded-lg p-3 bg-red-50 dark:bg-red-900/10"
+                    >
+                      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                        <div>
+                          <p className="text-xs text-gray-500 dark:text-gray-400">
+                            License Key
+                          </p>
+                          <p className="font-mono text-xs text-gray-900 dark:text-gray-100 break-all">
+                            {license.licenseKey}
+                          </p>
+                        </div>
+                        <div className="text-xs text-gray-500 dark:text-gray-400">
+                          Revoked:{" "}
+                          {formatDate(license.revoked?.revokedAt?.toString())}
+                        </div>
+                      </div>
+                      {license.revoked?.reason && (
+                        <p className="text-xs text-gray-700 dark:text-gray-200 mt-2">
+                          <span className="font-semibold">Reason:</span>{" "}
+                          {license.revoked.reason}
+                        </p>
+                      )}
+                      {license.revoked?.revokedBy && (
+                        <p className="text-xs text-gray-600 dark:text-gray-300">
+                          <span className="font-semibold">By:</span>{" "}
+                          {license.revoked.revokedBy.toString()}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
           </div>
@@ -714,11 +900,13 @@ export default function ClientDetailComponent({
                           ) : (
                             <XCircle className="w-3 h-3 text-red-600 dark:text-red-400" />
                           )}
-                          <span className={`font-medium ${
-                            entry.valid
-                              ? "text-green-800 dark:text-green-300"
-                              : "text-red-800 dark:text-red-300"
-                          }`}>
+                          <span
+                            className={`font-medium ${
+                              entry.valid
+                                ? "text-green-800 dark:text-green-300"
+                                : "text-red-800 dark:text-red-300"
+                            }`}
+                          >
                             {entry.valid ? "Valid" : "Invalid"}
                           </span>
                         </div>
@@ -729,7 +917,9 @@ export default function ClientDetailComponent({
                       <div className="space-y-1 text-[10px] text-gray-700 dark:text-gray-300">
                         <div className="flex items-center gap-1">
                           <Key className="w-2.5 h-2.5" />
-                          <span className="font-mono break-all">{entry.licenseKey}</span>
+                          <span className="font-mono break-all">
+                            {entry.licenseKey}
+                          </span>
                         </div>
                         <div className="flex items-center gap-1">
                           <Mail className="w-2.5 h-2.5" />
@@ -756,7 +946,9 @@ export default function ClientDetailComponent({
               ) : (
                 <div className="text-center py-6 border border-dashed border-gray-300 dark:border-gray-600 rounded-lg bg-gray-50 dark:bg-gray-700/30">
                   <CheckCircle className="w-8 h-8 text-gray-400 dark:text-gray-500 mx-auto mb-2" />
-                  <p className="text-xs text-gray-500 dark:text-gray-400">No validation history</p>
+                  <p className="text-xs text-gray-500 dark:text-gray-400">
+                    No validation history
+                  </p>
                 </div>
               )}
             </div>
@@ -785,7 +977,8 @@ export default function ClientDetailComponent({
                     </p>
                     {entry.oldValue && entry.newValue && (
                       <p className="text-[10px] text-gray-600 dark:text-gray-400 mb-1.5">
-                        <span className="font-medium">{entry.oldValue}</span> → <span className="font-medium">{entry.newValue}</span>
+                        <span className="font-medium">{entry.oldValue}</span> →{" "}
+                        <span className="font-medium">{entry.newValue}</span>
                       </p>
                     )}
                     {entry.notes && (
@@ -803,7 +996,10 @@ export default function ClientDetailComponent({
                         </span>
                         {entry.createdBy && (
                           <span className="text-[10px] text-gray-600 dark:text-gray-400">
-                            by <span className="font-medium text-gray-900 dark:text-gray-200">{entry.createdBy}</span>
+                            by{" "}
+                            <span className="font-medium text-gray-900 dark:text-gray-200">
+                              {entry.createdBy}
+                            </span>
                           </span>
                         )}
                       </div>
@@ -817,7 +1013,9 @@ export default function ClientDetailComponent({
             ) : (
               <div className="text-center py-8">
                 <Clock className="w-8 h-8 text-gray-400 dark:text-gray-500 mx-auto mb-2" />
-                <p className="text-xs text-gray-500 dark:text-gray-400">No history available</p>
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  No history available
+                </p>
               </div>
             )}
           </div>
@@ -838,8 +1036,12 @@ export default function ClientDetailComponent({
         }
         message={
           (client.status || "active") === "active"
-            ? `Are you sure you want to deactivate ${client.name || client.email}? You can add a note to explain the reason.`
-            : `Are you sure you want to activate ${client.name || client.email}? You can add a note to explain the reason.`
+            ? `Are you sure you want to deactivate ${
+                client.name || client.email
+              }? You can add a note to explain the reason.`
+            : `Are you sure you want to activate ${
+                client.name || client.email
+              }? You can add a note to explain the reason.`
         }
         placeholder="Add a note or remark about this status change (optional)..."
         confirmText="Confirm"
@@ -858,19 +1060,26 @@ export default function ClientDetailComponent({
         title={
           licenseActionType === "activate"
             ? "Activate License"
-            : licenseActionType === "deactivate"
-            ? "Deactivate License"
-            : "Revoke License"
+            : "Deactivate License"
         }
         message={
           licenseActionType === "activate"
             ? `Are you sure you want to activate this license? You can add a note to explain the reason.`
-            : licenseActionType === "deactivate"
-            ? `Are you sure you want to deactivate this license? You can add a note to explain the reason.`
-            : `Are you sure you want to revoke this license? This action is permanent and cannot be undone. You can add a note to explain the reason.`
+            : `Are you sure you want to deactivate this license? You can add a note to explain the reason.`
         }
         placeholder="Add a note or remark about this license status change (optional)..."
         confirmText="Confirm"
+        cancelText="Cancel"
+      />
+
+      <NoteDialog
+        isOpen={showRevokeDialog}
+        onClose={() => setShowRevokeDialog(false)}
+        onConfirm={handleRevokeNoteConfirm}
+        title="Revoke License"
+        message="Revoking a license will prevent it from being used going forward. You can optionally add a reason for tracking."
+        placeholder="Add a note or reason for revoking this license (optional)..."
+        confirmText="Revoke"
         cancelText="Cancel"
       />
     </div>
