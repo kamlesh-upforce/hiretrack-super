@@ -173,38 +173,31 @@ write_config() {
 # ------------------------------------------------
 # install_node() {
 #     local APP_DIR="$1"
-#     local NODE_VERSION
+#     local NODE_VERSION NODE_MAJOR_VERSION NEEDS_INSTALL=false NEEDS_REMOVE=false
 
 #     if [ -n "$APP_DIR" ] && [ -f "$APP_DIR/.env" ]; then
 #         NODE_VERSION=$(grep -E '^NODE_VERSION=' "$APP_DIR/.env" | cut -d '=' -f2)
 #     fi
-    
-#     # If NODE_VERSION is empty, skip installation
-#     if [ -z "$NODE_VERSION" ] || [ "$NODE_VERSION" = "" ]; then
+
+#     if [ -z "$NODE_VERSION" ]; then
 #         echo "⚠️ NODE_VERSION not found in .env file. Skipping Node.js installation."
 #         return 0
 #     fi
-    
-#     local NODE_MAJOR_VERSION
+
 #     NODE_MAJOR_VERSION=$(echo "$NODE_VERSION" | sed 's/v\([0-9]*\).*/\1/')
-    
-#     # Validate NODE_MAJOR_VERSION is not empty
-#     if [ -z "$NODE_MAJOR_VERSION" ] || [ "$NODE_MAJOR_VERSION" = "" ]; then
+#     if [ -z "$NODE_MAJOR_VERSION" ]; then
 #         echo "⚠️ Could not determine Node.js major version from: $NODE_VERSION. Skipping installation."
 #         return 0
 #     fi
 
-#     local NEEDS_INSTALL=false
-#     local NEEDS_REMOVE=false
-
 #     if command -v node >/dev/null 2>&1; then
 #         local CURRENT_VERSION
-#         CURRENT_VERSION=$(node -v | sed 's/v\([0-9]*\).*/\1/')
+#         CURRENT_VERSION=$(node -v 2>/dev/null | sed 's/v\([0-9]*\).*/\1/')
 #         if [ "$CURRENT_VERSION" = "$NODE_MAJOR_VERSION" ]; then
 #             echo "✅ Node.js version $NODE_MAJOR_VERSION.x already installed (found $(node -v))."
 #             return
 #         else
-#             echo "⚠ Node.js version $CURRENT_VERSION found, but version $NODE_MAJOR_VERSION.x required."
+#             echo "⚠ Found Node.js v$CURRENT_VERSION, but v$NODE_MAJOR_VERSION.x required."
 #             NEEDS_REMOVE=true
 #             NEEDS_INSTALL=true
 #         fi
@@ -213,14 +206,8 @@ write_config() {
 #         NEEDS_INSTALL=true
 #     fi
 
-#     # Remove existing Node.js if different version is installed
 #     if [ "$NEEDS_REMOVE" = "true" ]; then
-#         echo "🗑️ Removing existing Node.js installation..."
-#         local OS_TYPE
-#         OS_TYPE=$(uname | tr '[:upper:]' '[:lower:]')
-        
-#         # Find all node binaries in common locations
-#         echo "   Searching for existing node binaries..."
+#         echo "🗑️ Removing existing Node.js installation and cleaning up PATH..."
 #         local NODE_PATHS=(
 #             "/usr/bin/node"
 #             "/usr/local/bin/node"
@@ -228,275 +215,94 @@ write_config() {
 #             "/usr/bin/nodejs"
 #             "/usr/local/bin/nodejs"
 #             "$HOME/.nvm/versions/node/*/bin/node"
-#             "$HOME/.local/bin/node"
 #         )
-        
-#         # Also search using which/whereis
-#         if command -v node >/dev/null 2>&1; then
-#             local FOUND_NODE
-#             FOUND_NODE=$(command -v node 2>/dev/null || which node 2>/dev/null || echo "")
-#             if [ -n "$FOUND_NODE" ] && [ -f "$FOUND_NODE" ]; then
-#                 echo "   Found node at: $FOUND_NODE"
-#                 NODE_PATHS+=("$FOUND_NODE")
-#             fi
-#         fi
-        
-#         # Use whereis if available
-#         if command -v whereis >/dev/null 2>&1; then
-#             local WHEREIS_NODE
-#             WHEREIS_NODE=$(whereis -b node 2>/dev/null | awk '{for(i=2;i<=NF;i++) print $i}' || echo "")
-#             if [ -n "$WHEREIS_NODE" ]; then
-#                 while IFS= read -r path; do
-#                     if [ -f "$path" ]; then
-#                         NODE_PATHS+=("$path")
-#                     fi
-#                 done <<< "$WHEREIS_NODE"
-#             fi
-#         fi
-        
-#         # Remove all found node binaries
+
 #         for NODE_PATH in "${NODE_PATHS[@]}"; do
-#             # Handle glob patterns
-#             for path in $NODE_PATH; do
-#                 if [ -f "$path" ]; then
-#                     echo "   Removing $path..."
-#                     sudo rm -f "$path" 2>/dev/null || rm -f "$path" 2>/dev/null || true
-#                 fi
+#             for p in $NODE_PATH; do
+#                 [ -f "$p" ] && echo "   Removing $p..." && sudo rm -f "$p" 2>/dev/null || true
 #             done
 #         done
-        
-#         # Remove node_modules directories that might contain binaries
-#         if [[ "$OS_TYPE" == "linux" ]]; then
-#             if command -v apt-get >/dev/null 2>&1; then
-#                 sudo apt-get remove -y nodejs npm 2>/dev/null || true
-#                 sudo apt-get purge -y nodejs npm 2>/dev/null || true
-#                 # Remove NodeSource repository files
-#                 sudo rm -f /etc/apt/sources.list.d/nodesource*.list 2>/dev/null || true
-#                 sudo rm -f /usr/share/keyrings/nodesource.gpg 2>/dev/null || true
-#                 # Clean up any leftover node_modules
-#                 sudo rm -rf /usr/lib/node_modules 2>/dev/null || true
-#                 sudo apt-get update 2>/dev/null || true
-#             elif command -v yum >/dev/null 2>&1; then
-#                 sudo yum remove -y nodejs npm 2>/dev/null || true
-#                 sudo rm -f /etc/yum.repos.d/nodesource*.repo 2>/dev/null || true
-#             fi
-#         elif [[ "$OS_TYPE" == "darwin" ]]; then
-#             if command -v brew >/dev/null 2>&1; then
-#                 brew uninstall --ignore-dependencies node 2>/dev/null || true
-#                 brew uninstall --ignore-dependencies node@* 2>/dev/null || true
-#             fi
-#         fi
-        
-#         # Clear command cache
+
+#         sudo apt-get remove -y nodejs npm 2>/dev/null || true
+#         sudo apt-get purge -y nodejs npm 2>/dev/null || true
+#         sudo rm -rf /usr/lib/node_modules ~/.nvm 2>/dev/null || true
+#         sudo rm -f /etc/apt/sources.list.d/nodesource*.list /usr/share/keyrings/nodesource.gpg 2>/dev/null || true
 #         hash -r 2>/dev/null || true
-#         unset -f node 2>/dev/null || true
-#         echo "✅ Existing Node.js removed."
+
+#         # Remove NVM path from startup scripts if any
+#         sed -i '/nvm/d' ~/.bashrc ~/.profile ~/.bash_login ~/.bash_profile 2>/dev/null || true
+#         export PATH="/usr/local/bin:/usr/bin:/bin"
+#         echo "✅ Cleanup complete. PATH reset to safe defaults."
 #     fi
 
 #     if [ "$NEEDS_INSTALL" = "true" ]; then
-#         echo "📦 Installing Node.js version $NODE_MAJOR_VERSION globally..."
-#         local OS_TYPE
-#         OS_TYPE=$(uname | tr '[:upper:]' '[:lower:]')
+#         echo "📦 Installing Node.js $NODE_MAJOR_VERSION.x..."
 #         local CODENAME
+#         CODENAME=$(lsb_release -cs 2>/dev/null || echo "focal")
 
-#         if [[ "$OS_TYPE" == "linux" ]]; then
-#             if command -v apt-get >/dev/null 2>&1; then
-#                 # Wait for any running apt processes to finish
-#                 echo "⏳ Checking for running apt processes..."
-#                 local MAX_WAIT=60
-#                 local WAITED=0
-#                 while pgrep -x apt >/dev/null 2>&1 || pgrep -x apt-get >/dev/null 2>&1 || [ -f /var/lib/dpkg/lock-frontend ] || [ -f /var/lib/dpkg/lock ]; do
-#                     if [ $WAITED -ge $MAX_WAIT ]; then
-#                         echo "⚠️ Waited $MAX_WAIT seconds for apt to finish. Proceeding anyway..."
-#                         break
-#                     fi
-#                     echo "   Waiting for apt to finish... ($WAITED/$MAX_WAIT seconds)"
-#                     sleep 2
-#                     WAITED=$((WAITED + 2))
-#                 done
-                
-#                 CODENAME=$(lsb_release -cs 2>/dev/null || echo "focal")
-#                 curl -fsSL "https://deb.nodesource.com/setup_$NODE_MAJOR_VERSION.x" | sudo -E bash -
-#                 sudo apt-get update -y
-                
-#                 # Install nodejs and verify it was installed
-#                 if ! sudo apt-get install -y --allow-downgrades nodejs; then
-#                     echo "❌ Failed to install nodejs package."
-#                     exit 1
-#                 fi
-                
-#                 # Verify package is actually installed
-#                 if ! dpkg -l | grep -q "^ii.*nodejs"; then
-#                     echo "❌ nodejs package not found after installation."
-#                     exit 1
-#                 fi
-                
-#                 echo "✅ nodejs package installed successfully."
-#             elif command -v yum >/dev/null 2>&1; then
-#                 curl -fsSL "https://rpm.nodesource.com/setup_$NODE_MAJOR_VERSION.x" | sudo -E bash -
-#                 sudo yum install -y nodejs
-#             else
-#                 echo "❌ Unsupported Linux package manager. Install Node.js manually."
-#                 exit 1
-#             fi
-#         elif [[ "$OS_TYPE" == "darwin" ]]; then
-#             if ! command -v brew >/dev/null 2>&1; then
-#                 echo "❌ Homebrew not found. Install Homebrew first."
-#                 exit 1
-#             fi
-#             brew install node@$NODE_MAJOR_VERSION
-#             brew link node@$NODE_MAJOR_VERSION --force --overwrite
-#         else
-#             echo "❌ Unsupported OS: $OS_TYPE"
-#             exit 1
-#         fi
-        
-#         # Refresh command cache and wait a moment for system to recognize new installation
-#         hash -r 2>/dev/null || true
+#         curl -fsSL "https://deb.nodesource.com/setup_$NODE_MAJOR_VERSION.x" | sudo -E bash -
+#         sudo apt-get update -y
+#         sudo apt-get install -y nodejs || { echo "❌ Failed to install Node.js."; exit 1; }
+
+#         # Ensure correct binary
+#         hash -r
 #         export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
-#         sleep 3
-        
-#         echo "🔍 Verifying Node.js installation..."
-        
-#         # Find all node binaries in the system
-#         local ALL_NODE_BINS=()
-#         local SEARCH_PATHS=(
-#             "/usr/bin/node"
-#             "/usr/local/bin/node"
-#             "/opt/nodejs/bin/node"
-#         )
-        
-#         # Search in PATH
+
+#         if ! command -v node >/dev/null 2>&1; then
+#             echo "❌ Node.js not found in PATH after installation."
+#             exit 1
+#         fi
+
+#         local NODE_PATH
+#         NODE_PATH=$(command -v node)
+#         local NODE_VER
+#         NODE_VER=$(node -v)
+#         local NPM_VER
+#         NPM_VER=$(npm -v 2>/dev/null || echo "missing")
+
+#         echo "✅ Node.js $NODE_VER and npm $NPM_VER installed successfully."
+#         echo "   Active binary: $NODE_PATH"
+#         echo "♻️ Reloading environment to apply Node.js changes..."
+#         export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
+#         hash -r
+#         sleep 1
+#         # Verify new node in PATH
 #         if command -v node >/dev/null 2>&1; then
-#             local PATH_NODE
-#             PATH_NODE=$(command -v node 2>/dev/null)
-#             if [ -n "$PATH_NODE" ] && [ -f "$PATH_NODE" ]; then
-#                 ALL_NODE_BINS+=("$PATH_NODE")
-#             fi
-#         fi
-        
-#         # Check common locations
-#         for path in "${SEARCH_PATHS[@]}"; do
-#             if [ -f "$path" ] && [ -x "$path" ]; then
-#                 ALL_NODE_BINS+=("$path")
-#             fi
-#         done
-        
-#         # Use whereis if available
-#         if command -v whereis >/dev/null 2>&1; then
-#             local WHEREIS_NODE
-#             WHEREIS_NODE=$(whereis -b node 2>/dev/null | awk '{for(i=2;i<=NF;i++) print $i}' || echo "")
-#             if [ -n "$WHEREIS_NODE" ]; then
-#                 while IFS= read -r path; do
-#                     if [ -f "$path" ] && [ -x "$path" ] && [[ ! " ${ALL_NODE_BINS[@]} " =~ " ${path} " ]]; then
-#                         ALL_NODE_BINS+=("$path")
-#                     fi
-#                 done <<< "$WHEREIS_NODE"
-#             fi
-#         fi
-        
-#         if [ ${#ALL_NODE_BINS[@]} -eq 0 ]; then
-#             echo "❌ Node.js binary not found after installation."
-#             exit 1
-#         fi
-        
-#         echo "   Found ${#ALL_NODE_BINS[@]} node binary(ies):"
-#         local CORRECT_NODE=""
-#         local WRONG_NODES=()
-        
-#         for NODE_BIN in "${ALL_NODE_BINS[@]}"; do
-#             if [ -x "$NODE_BIN" ]; then
-#                 local INSTALLED_VERSION
-#                 INSTALLED_VERSION=$("$NODE_BIN" -v 2>/dev/null | sed 's/v\([0-9]*\).*/\1/' || echo "unknown")
-#                 echo "   - $NODE_BIN: v$INSTALLED_VERSION.x"
-                
-#                 if [ "$INSTALLED_VERSION" = "$NODE_MAJOR_VERSION" ]; then
-#                     CORRECT_NODE="$NODE_BIN"
-#                 else
-#                     WRONG_NODES+=("$NODE_BIN")
-#                 fi
-#             fi
-#         done
-        
-#         if [ -n "$CORRECT_NODE" ]; then
-#             # Found correct version, use it
-#             export PATH="$(dirname "$CORRECT_NODE"):$PATH"
-#             hash -r 2>/dev/null || true
-            
-#             # Remove wrong version nodes if found
-#             if [ ${#WRONG_NODES[@]} -gt 0 ]; then
-#                 echo "   ⚠️ Removing incorrect node binaries..."
-#                 for wrong_node in "${WRONG_NODES[@]}"; do
-#                     echo "   Removing $wrong_node..."
-#                     sudo rm -f "$wrong_node" 2>/dev/null || rm -f "$wrong_node" 2>/dev/null || true
-#                 done
-#                 hash -r 2>/dev/null || true
-#             fi
-            
-#             local NPM_VERSION=""
-#             if command -v npm >/dev/null 2>&1; then
-#                 NPM_VERSION=$(npm -v 2>/dev/null || echo "unknown")
-#             fi
-            
-#             # Final verification
-#             local FINAL_CHECK
-#             FINAL_CHECK=$(command -v node 2>/dev/null || echo "")
-#             if [ -n "$FINAL_CHECK" ]; then
-#                 local FINAL_VERSION
-#                 FINAL_VERSION=$(node -v 2>/dev/null | sed 's/v\([0-9]*\).*/\1/' || echo "")
-#                 if [ "$FINAL_VERSION" = "$NODE_MAJOR_VERSION" ]; then
-#                     echo "✅ Node.js $NODE_MAJOR_VERSION and npm ${NPM_VERSION:-unknown} installed successfully."
-#                     echo "   Active node: $(command -v node) (v$FINAL_VERSION.x)"
-#                 else
-#                     echo "⚠️ Warning: node command points to v$FINAL_VERSION.x instead of v$NODE_MAJOR_VERSION.x"
-#                     echo "   Correct binary exists at: $CORRECT_NODE"
-#                     echo "   Please run: export PATH=\"$(dirname "$CORRECT_NODE"):\$PATH\" && hash -r"
-#                 fi
-#             else
-#                 echo "✅ Node.js $NODE_MAJOR_VERSION installed at: $CORRECT_NODE"
-#             fi
+#             echo "✅ Node.js environment refreshed successfully (using $(node -v))"
 #         else
-#             echo "❌ Version mismatch: No node binary found with version $NODE_MAJOR_VERSION"
-#             echo "   Found versions:"
-#             for NODE_BIN in "${ALL_NODE_BINS[@]}"; do
-#                 if [ -x "$NODE_BIN" ]; then
-#                     local VERSION
-#                     VERSION=$("$NODE_BIN" -v 2>/dev/null || echo "unknown")
-#                     echo "   - $NODE_BIN: $VERSION"
-#                 fi
-#             done
-#             exit 1
+#             echo "⚠️ Node.js not detected after reload. You may need to restart your terminal manually."
 #         fi
+
 #     fi
 # }
 
+
+
 install_node() {
     local APP_DIR="$1"
-    local NODE_VERSION NODE_MAJOR_VERSION NEEDS_INSTALL=false NEEDS_REMOVE=false
+    local NODE_VERSION NODE_CLEAN NEEDS_INSTALL=false NEEDS_REMOVE=false
 
     if [ -n "$APP_DIR" ] && [ -f "$APP_DIR/.env" ]; then
         NODE_VERSION=$(grep -E '^NODE_VERSION=' "$APP_DIR/.env" | cut -d '=' -f2)
     fi
 
     if [ -z "$NODE_VERSION" ]; then
-        echo "⚠️ NODE_VERSION not found in .env file. Skipping Node.js installation."
+        echo "⚠️ NODE_VERSION not found in .env. Skipping installation."
         return 0
     fi
 
-    NODE_MAJOR_VERSION=$(echo "$NODE_VERSION" | sed 's/v\([0-9]*\).*/\1/')
-    if [ -z "$NODE_MAJOR_VERSION" ]; then
-        echo "⚠️ Could not determine Node.js major version from: $NODE_VERSION. Skipping installation."
-        return 0
-    fi
+    NODE_CLEAN=$(echo "$NODE_VERSION" | sed 's/^v//') # remove leading v
 
+    # --- Check installed version ---
     if command -v node >/dev/null 2>&1; then
-        local CURRENT_VERSION
-        CURRENT_VERSION=$(node -v 2>/dev/null | sed 's/v\([0-9]*\).*/\1/')
-        if [ "$CURRENT_VERSION" = "$NODE_MAJOR_VERSION" ]; then
-            echo "✅ Node.js version $NODE_MAJOR_VERSION.x already installed (found $(node -v))."
-            return
+        local CURRENT_FULL
+        CURRENT_FULL=$(node -v | sed 's/^v//')
+
+        if [ "$CURRENT_FULL" = "$NODE_CLEAN" ]; then
+            echo "✅ Node.js $CURRENT_FULL already installed."
+            return 0
         else
-            echo "⚠ Found Node.js v$CURRENT_VERSION, but v$NODE_MAJOR_VERSION.x required."
+            echo "⚠ Found Node.js $CURRENT_FULL but need $NODE_CLEAN."
             NEEDS_REMOVE=true
             NEEDS_INSTALL=true
         fi
@@ -505,73 +311,69 @@ install_node() {
         NEEDS_INSTALL=true
     fi
 
+    # --- Remove existing Node.js ---
     if [ "$NEEDS_REMOVE" = "true" ]; then
-        echo "🗑️ Removing existing Node.js installation and cleaning up PATH..."
-        local NODE_PATHS=(
-            "/usr/bin/node"
-            "/usr/local/bin/node"
-            "/opt/nodejs/bin/node"
-            "/usr/bin/nodejs"
-            "/usr/local/bin/nodejs"
-            "$HOME/.nvm/versions/node/*/bin/node"
-        )
+        echo "🗑️ Removing existing Node.js installation..."
 
-        for NODE_PATH in "${NODE_PATHS[@]}"; do
-            for p in $NODE_PATH; do
-                [ -f "$p" ] && echo "   Removing $p..." && sudo rm -f "$p" 2>/dev/null || true
-            done
-        done
+        sudo rm -rf /usr/local/lib/nodejs
+        sudo rm -f /usr/local/bin/node
+        sudo rm -f /usr/local/bin/npm
+        sudo rm -f /usr/local/bin/npx
 
         sudo apt-get remove -y nodejs npm 2>/dev/null || true
         sudo apt-get purge -y nodejs npm 2>/dev/null || true
-        sudo rm -rf /usr/lib/node_modules ~/.nvm 2>/dev/null || true
-        sudo rm -f /etc/apt/sources.list.d/nodesource*.list /usr/share/keyrings/nodesource.gpg 2>/dev/null || true
-        hash -r 2>/dev/null || true
+        sudo rm -rf /usr/lib/node_modules
 
-        # Remove NVM path from startup scripts if any
-        sed -i '/nvm/d' ~/.bashrc ~/.profile ~/.bash_login ~/.bash_profile 2>/dev/null || true
-        export PATH="/usr/local/bin:/usr/bin:/bin"
-        echo "✅ Cleanup complete. PATH reset to safe defaults."
+        hash -r
+        echo "✅ Existing Node.js removed."
     fi
 
+    # --- Install EXACT version from nodejs.org ---
     if [ "$NEEDS_INSTALL" = "true" ]; then
-        echo "📦 Installing Node.js $NODE_MAJOR_VERSION.x..."
-        local CODENAME
-        CODENAME=$(lsb_release -cs 2>/dev/null || echo "focal")
+        echo "📦 Installing Node.js $NODE_CLEAN (exact version)..."
 
-        curl -fsSL "https://deb.nodesource.com/setup_$NODE_MAJOR_VERSION.x" | sudo -E bash -
-        sudo apt-get update -y
-        sudo apt-get install -y nodejs || { echo "❌ Failed to install Node.js."; exit 1; }
+        local ARCH
+        local PLATFORM="linux"
+        ARCH=$(uname -m)
 
-        # Ensure correct binary
-        hash -r
-        export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
+        case "$ARCH" in
+            x86_64) ARCH="x64" ;;
+            aarch64|arm64) ARCH="arm64" ;;
+            armv7l) ARCH="armv7l" ;;
+            *) 
+                echo "❌ Unsupported architecture: $ARCH"
+                exit 1 
+            ;;
+        esac
 
-        if ! command -v node >/dev/null 2>&1; then
-            echo "❌ Node.js not found in PATH after installation."
+        local NODE_DIR="/usr/local/lib/nodejs"
+        sudo mkdir -p "$NODE_DIR"
+
+        local TARFILE="node-v$NODE_CLEAN-$PLATFORM-$ARCH.tar.xz"
+        local URL="https://nodejs.org/dist/v$NODE_CLEAN/$TARFILE"
+
+        echo "⬇️ Downloading $URL"
+        curl -fsSL "$URL" -o "/tmp/$TARFILE" || {
+            echo "❌ Failed to download Node.js $NODE_CLEAN"
             exit 1
-        fi
+        }
 
-        local NODE_PATH
-        NODE_PATH=$(command -v node)
-        local NODE_VER
-        NODE_VER=$(node -v)
-        local NPM_VER
-        NPM_VER=$(npm -v 2>/dev/null || echo "missing")
+        echo "📦 Extracting..."
+        sudo tar -xJf "/tmp/$TARFILE" -C "$NODE_DIR"
+        rm -f "/tmp/$TARFILE"
 
-        echo "✅ Node.js $NODE_VER and npm $NPM_VER installed successfully."
-        echo "   Active binary: $NODE_PATH"
-        echo "♻️ Reloading environment to apply Node.js changes..."
-        export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
+        # Symlink binaries
+        sudo ln -sf "$NODE_DIR/node-v$NODE_CLEAN-$PLATFORM-$ARCH/bin/node" /usr/local/bin/node
+        sudo ln -sf "$NODE_DIR/node-v$NODE_CLEAN-$PLATFORM-$ARCH/bin/npm"  /usr/local/bin/npm
+        sudo ln -sf "$NODE_DIR/node-v$NODE_CLEAN-$PLATFORM-$ARCH/bin/npx"  /usr/local/bin/npx
+
         hash -r
-        sleep 1
-        # Verify new node in PATH
-        if command -v node >/dev/null 2>&1; then
-            echo "✅ Node.js environment refreshed successfully (using $(node -v))"
-        else
-            echo "⚠️ Node.js not detected after reload. You may need to restart your terminal manually."
-        fi
 
+        echo "🔍 Verifying..."
+        node -v || { echo "❌ Node not installed properly"; exit 1; }
+        npm -v || echo "⚠ npm missing (unexpected)"
+
+        echo "✅ Installed Node.js $(node -v)"
     fi
 }
 
@@ -956,7 +758,10 @@ rollback() {
         tar -xf "$BACKUP_FILE" -C "$APP_INSTALL_DIR" 2>&1 | tee -a "$ROLLBACK_LOG_FILE"
         cd "$APP_INSTALL_DIR" || exit
         echo "📦 Restoring dependencies..." | tee -a "$ROLLBACK_LOG_FILE"
-        npm install --legacy-peer-deps 2>&1 | tee -a "$ROLLBACK_LOG_FILE"
+        if ! clean_npm_install "$APP_INSTALL_DIR" 2>&1 | tee -a "$ROLLBACK_LOG_FILE"; then
+            echo "❌ npm install failed during rollback." | tee -a "$ROLLBACK_LOG_FILE"
+            return 1
+        fi
 
         echo "🚀 Restarting previous version with PM2..." | tee -a "$ROLLBACK_LOG_FILE"
 
@@ -988,155 +793,53 @@ rollback() {
 
 
 
-# safe_npm_install() {
-#     echo "📦 Running safe npm install on directory: ($PWD)..."
+clean_npm_install() {
+    local TARGET_DIR="${1:-$PWD}"
 
-#     # Remove NVM from PATH completely
-#     export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v nvm | tr '\n' ':' | sed 's/:$//')
-    
-#     # Ensure we're using system Node.js (not NVM) - set clean PATH
-#     export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-#     hash -r 2>/dev/null || true
+    if [ ! -d "$TARGET_DIR" ]; then
+        echo "❌ Target directory not found: $TARGET_DIR"
+        return 1
+    fi
 
-#     # Verify package.json exists
-#     if [ ! -f "package.json" ]; then
-#         echo "❌ package.json not found in current directory: $PWD"
-#         echo "   Directory contents:"
-#         ls -la | head -20
-#         exit 1
-#     fi
-#     echo "✅ Found package.json"
+    if [ ! -f "$TARGET_DIR/package.json" ]; then
+        echo "❌ package.json not found in $TARGET_DIR"
+        echo "📁 Directory contents:"
+        ls -la "$TARGET_DIR" | head -40 || true
+        return 1
+    fi
 
-#     # Verify Node.js and npm are available
-#     if ! command -v node >/dev/null 2>&1; then
-#         echo "❌ Node.js not found in PATH. Please ensure Node.js is installed."
-#         echo "   Current PATH: $PATH"
-#         echo "   Checking common locations..."
-#         [ -f "/usr/bin/node" ] && echo "   Found: /usr/bin/node" || echo "   Not found: /usr/bin/node"
-#         [ -f "/usr/local/bin/node" ] && echo "   Found: /usr/local/bin/node" || echo "   Not found: /usr/local/bin/node"
-#         exit 1
-#     fi
+    (
+    cd "$TARGET_DIR" || exit 1
 
-#     if ! command -v npm >/dev/null 2>&1; then
-#         echo "❌ npm not found in PATH. Please ensure npm is installed."
-#         exit 1
-#     fi
+    case ":$PATH:" in
+        *":/bin:"*) ;;
+        *) export PATH="/usr/local/bin:/usr/bin:/bin:$PATH" ;;
+    esac
+    echo "🧹 Performing full clean-room reset for npm in directory: ($PWD)..."
 
-#     local NODE_VER NPM_VER
-#     NODE_VER=$(node -v 2>/dev/null || echo "unknown")
-#     NPM_VER=$(npm -v 2>/dev/null || echo "unknown")
-#     echo "🔍 Using Node.js: $NODE_VER, npm: $NPM_VER"
-#     echo "   Node.js path: $(command -v node)"
-#     echo "   npm path: $(command -v npm)"
+    # npm cache clean --force >/dev/null 2>&1 || true   
+    # sudo rm -r package-lock.json >/dev/null 2>&1 || true
+    if [ -d node_modules ]; then
+        echo "   removing node_modules..."
+        rm -rf node_modules 2>/dev/null || sudo rm -rf node_modules
+    fi
 
-#     sleep 1
-    
-#     # Clean npm cache more thoroughly
-#     echo "🧹 Cleaning npm cache..."
-#     npm cache clean --force 2>/dev/null || true
-#     rm -rf ~/.npm/_cacache 2>/dev/null || true
-    
-#     # Remove existing node_modules and lock files
-#     echo "🗑️ Removing existing node_modules and lock files..."
-#     rm -rf node_modules package-lock.json npm-shrinkwrap.json 2>/dev/null || true
-    
-#     # Retry npm install with better error handling
-#     local MAX_RETRIES=3
-#     local RETRY_COUNT=0
-#     local INSTALL_SUCCESS=false
+    echo "🔍 Node version: $(node -v)"
+    echo "🔍 npm version: $(npm -v)"
+    echo "🔍 node path: $(command -v node)"
+    echo "🔍 npm path: $(command -v npm)"
 
-#     while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-#         RETRY_COUNT=$((RETRY_COUNT + 1))
-        
-#         if [ $RETRY_COUNT -gt 1 ]; then
-#             echo "🔄 Retry attempt $RETRY_COUNT of $MAX_RETRIES..."
-#             # Clean cache again before retry
-#             npm cache clean --force 2>/dev/null || true
-#             rm -rf ~/.npm/_cacache 2>/dev/null || true
-#             sleep 2
-#         fi
+    echo "📦 Running npm install in clean mode... in directory: ($PWD)..."
+    npm install --legacy-peer-deps
+    local NPM_EXIT=$?
+    if [ $NPM_EXIT -ne 0 ]; then
+        echo "❌ npm install failed with code $NPM_EXIT"
+        return $NPM_EXIT
+    fi
 
-#         echo "📦 Running npm install (attempt $RETRY_COUNT/$MAX_RETRIES)..."
-        
-#         # Run npm install with timeout and capture output
-#         if npm install --legacy-peer-deps --force --no-audit --no-fund 2>&1 | tee /tmp/npm_install.log; then
-#             INSTALL_SUCCESS=true
-#             break
-#         else
-#             local EXIT_CODE=$?
-#             echo "⚠️ npm install failed with exit code: $EXIT_CODE"
-            
-#             # Check if it's a corruption issue
-#             if grep -q "ENOENT\|corrupted\|tarball" /tmp/npm_install.log 2>/dev/null; then
-#                 echo "💡 Detected tarball corruption. Cleaning cache and retrying..."
-#                 npm cache clean --force 2>/dev/null || true
-#                 rm -rf ~/.npm/_cacache 2>/dev/null || true
-#                 rm -rf node_modules 2>/dev/null || true
-#             fi
-#         fi
-#     done
-
-#     if [ "$INSTALL_SUCCESS" != "true" ]; then
-#         echo "❌ npm install failed after $MAX_RETRIES attempts."
-#         echo "💡 Check /tmp/npm_install.log for details."
-#         exit 1
-#     fi
-
-#     # Verify installation - check if node_modules exists and has content
-#     if [ ! -d "node_modules" ]; then
-#         echo "❌ node_modules directory is missing after installation."
-#         exit 1
-#     fi
-    
-#     # Count files/directories in node_modules (excluding ._ files)
-#     local MODULE_COUNT
-#     MODULE_COUNT=$(find node_modules -mindepth 1 -maxdepth 1 ! -name "._*" 2>/dev/null | wc -l)
-    
-#     if [ "$MODULE_COUNT" -eq 0 ]; then
-#         echo "❌ node_modules directory appears to be empty after installation."
-#         exit 1
-#     fi
-    
-#     echo "✅ Verified node_modules contains $MODULE_COUNT top-level packages"
-
-#     # Final verification that Node.js and npm are still working
-#     # Remove NVM from PATH and use system paths only
-#     export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v nvm | tr '\n' ':' | sed 's/:$//')
-#     export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-#     hash -r 2>/dev/null || true
-    
-#     if ! command -v node >/dev/null 2>&1; then
-#         echo "❌ ERROR: Node.js is not accessible after npm install!"
-#         echo "   This may indicate a PATH issue. Try running:"
-#         echo "   export PATH=\"/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\""
-#         echo "   hash -r"
-#         echo "   node -v"
-#         exit 1
-#     fi
-    
-#     # Verify we're using system Node.js, not NVM
-#     local FINAL_NODE_PATH
-#     FINAL_NODE_PATH=$(command -v node)
-#     if echo "$FINAL_NODE_PATH" | grep -q nvm; then
-#         echo "⚠️ WARNING: Still using NVM Node.js: $FINAL_NODE_PATH"
-#         echo "   Attempting to use system Node.js..."
-#         if [ -f "/usr/bin/node" ]; then
-#             export PATH="/usr/bin:/usr/local/bin:/bin:$PATH"
-#             hash -r 2>/dev/null || true
-#             FINAL_NODE_PATH=$(command -v node)
-#         fi
-#     fi
-
-#     local FINAL_NODE_VER FINAL_NPM_VER FINAL_NPM_PATH
-#     FINAL_NODE_VER=$(node -v 2>/dev/null || echo "unknown")
-#     FINAL_NPM_VER=$(npm -v 2>/dev/null || echo "unknown")
-#     FINAL_NPM_PATH=$(command -v npm 2>/dev/null || echo "unknown")
-    
-#     echo "✅ npm install completed successfully"
-#     echo "   Node.js: $FINAL_NODE_VER (at $FINAL_NODE_PATH)"
-#     echo "   npm: $FINAL_NPM_VER (at $FINAL_NPM_PATH)"
-# }
-
+    echo "✅ npm install completed successfully in $(pwd)"
+    )
+}
 
 # -------------------------------
 # Main update & install function
@@ -1302,10 +1005,10 @@ check_update_and_install() {
     fi
     mkdir -p "$APP_INSTALL_DIR"
     log "📂 Extracting archive to $APP_INSTALL_DIR..."
-    
+
     # Extract archive, filtering out macOS xattr warnings but preserving real errors
     local EXTRACT_OUTPUT EXTRACT_STATUS
-    EXTRACT_OUTPUT=$(tar -xzf "$TMP_FILE" -C "$APP_INSTALL_DIR" 2>&1)
+    EXTRACT_OUTPUT=$(tar --no-xattrs -xzf "$TMP_FILE" -C "$APP_INSTALL_DIR" 2>&1)
     EXTRACT_STATUS=$?
     
     # Filter out harmless macOS xattr warnings
@@ -1314,70 +1017,18 @@ check_update_and_install() {
     fi
     
     if [ $EXTRACT_STATUS -ne 0 ]; then
-        log "❌ Extraction failed (exit code: $EXTRACT_STATUS). The archive may be corrupted or incomplete."
+        log "❌ Extraction failed. The archive may be corrupted or incomplete."
         log "💡 File size: $FILE_SIZE_DISPLAY"
         log "💡 Attempting to re-download..."
         rm -f "$TMP_FILE"
-        
-        # Retry download once
-        log "📥 Re-downloading $ASSET_URL → $TMP_FILE"
-        if curl -L --fail --progress-bar --show-error "$ASSET_URL" -o "$TMP_FILE" && [ -f "$TMP_FILE" ] && [ -s "$TMP_FILE" ]; then
-            log "📦 Re-download complete. Retrying extraction..."
-            EXTRACT_OUTPUT=$(tar -xzf "$TMP_FILE" -C "$APP_INSTALL_DIR" 2>&1)
-            EXTRACT_STATUS=$?
-            if [ -n "$EXTRACT_OUTPUT" ]; then
-                echo "$EXTRACT_OUTPUT" | grep -v "LIBARCHIVE.xattr" | grep -v "^$" >&2 || true
-            fi
-            
-            if [ $EXTRACT_STATUS -ne 0 ]; then
-                log "❌ Extraction failed again after re-download. Rolling back..."
-                rm -f "$TMP_FILE"
-                rollback "$INSTALLED_VERSION"
-                return 1
-            fi
-            # Clean up macOS resource fork files after retry extraction
-            find "$APP_INSTALL_DIR" -type f -name "._*" -delete 2>/dev/null || true
-        else
-            log "❌ Re-download failed. Rolling back..."
-            rm -f "$TMP_FILE"
-            rollback "$INSTALLED_VERSION"
-            return 1
-        fi
+        rollback "$INSTALLED_VERSION"
+        return 1
     fi
-    rm -f "$TMP_FILE"
+    rm -f "$TMP_FILE" >/dev/null 2>&1 || true
     log "✅ Extracted to: $APP_INSTALL_DIR"
     
-    # Clean up macOS resource fork files (._* files) created during extraction
-    # These are harmless but can clutter the directory
-    log "🧹 Cleaning up macOS resource fork files..."
-    # find "$APP_INSTALL_DIR" -type f -name "._*" -delete 2>/dev/null || true
-    local CLEANED_COUNT
-    CLEANED_COUNT=$(find "$APP_INSTALL_DIR" -type f -name "._*" 2>/dev/null | wc -l)
-    if [ "$CLEANED_COUNT" -gt 0 ]; then
-        log "⚠️ Some macOS resource fork files may remain (this is harmless)"
-    else
-        log "✅ Cleaned up macOS resource fork files"
-    fi
+
     
-    # Handle case where archive extracts into a subdirectory
-    # Check if package.json is in a subdirectory
-    if [ ! -f "$APP_INSTALL_DIR/package.json" ]; then
-        log "🔍 package.json not found in root. Checking for subdirectories..."
-        local SUBDIR
-        SUBDIR=$(find "$APP_INSTALL_DIR" -maxdepth 2 -name "package.json" -type f 2>/dev/null | head -n1 | xargs dirname 2>/dev/null)
-        
-        if [ -n "$SUBDIR" ] && [ "$SUBDIR" != "$APP_INSTALL_DIR" ]; then
-            log "📦 Found package.json in subdirectory: $SUBDIR"
-            log "🔄 Moving contents to app root..."
-            # Move all contents from subdirectory to app root
-            mv "$SUBDIR"/* "$APP_INSTALL_DIR"/ 2>/dev/null || true
-            mv "$SUBDIR"/.* "$APP_INSTALL_DIR"/ 2>/dev/null || true
-            # Remove empty subdirectory
-            rmdir "$SUBDIR" 2>/dev/null || true
-            log "✅ Contents moved to app root"
-        fi
-    fi
-  
       
     # Verify package.json exists
     if [ ! -f "$APP_INSTALL_DIR/package.json" ]; then
@@ -1398,47 +1049,6 @@ check_update_and_install() {
     [ "$DB_CHOICE" = "local" ] && install_and_start_mongodb
     install_node "$APP_INSTALL_DIR" || { log "❌ Node install failed."; rollback "$INSTALLED_VERSION"; return 1; }
     
-    # # Clean up NVM from PATH and shell startup files
-    # log "🧹 Cleaning up NVM references from PATH..."
-    # # Remove NVM from current PATH
-    # export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v nvm | tr '\n' ':' | sed 's/:$//')
-    # # Remove NVM from shell startup files
-    # for file in ~/.bashrc ~/.profile ~/.bash_profile ~/.bash_login ~/.zshrc; do
-    #     if [ -f "$file" ]; then
-    #         sed -i '/NVM_DIR/d' "$file" 2>/dev/null || true
-    #         sed -i '/nvm.sh/d' "$file" 2>/dev/null || true
-    #         sed -i '/nvm/d' "$file" 2>/dev/null || true
-    #     fi
-    # done
-    
-    # # Set PATH with system Node.js paths first (no NVM)
-    # export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-    # hash -r 2>/dev/null || true
-    
-    # # Verify Node.js is accessible and is system Node.js (not NVM)
-    # if ! command -v node >/dev/null 2>&1; then
-    #     log "❌ Node.js not found in PATH after installation. PATH: $PATH"
-    #     rollback "$INSTALLED_VERSION"
-    #     return 1
-    # fi
-    
-    # local NODE_PATH
-    # NODE_PATH=$(command -v node)
-    # if echo "$NODE_PATH" | grep -q nvm; then
-    #     log "⚠️ WARNING: Node.js path contains NVM: $NODE_PATH"
-    #     log "🔄 Forcing use of system Node.js..."
-    #     # Try to find system Node.js
-    #     if [ -f "/usr/bin/node" ]; then
-    #         export PATH="/usr/bin:/usr/local/bin:/bin:$PATH"
-    #         hash -r 2>/dev/null || true
-    #         NODE_PATH=$(command -v node)
-    #     elif [ -f "/usr/local/bin/node" ]; then
-    #         export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
-    #         hash -r 2>/dev/null || true
-    #         NODE_PATH=$(command -v node)
-    #     fi
-    # fi
-    
     log "✅ Using Node.js ($(node -v))"
     
     cd "$APP_INSTALL_DIR" || { log "❌ Failed to cd into app dir."; rollback "$INSTALLED_VERSION"; return 1; }
@@ -1451,10 +1061,12 @@ check_update_and_install() {
     else
         log "⚠️ Directory $APP_INSTALL_DIR does not exist"
     fi
-    
-    # safe_npm_install || { log "❌ npm install failed."; rollback "$INSTALLED_VERSION"; return 1; }
-    echo "📦 Running npm install --legacy-peer-deps... ($PWD) AND ($(npm -v)) ($(node -v))  "
-    npm install --legacy-peer-deps  || { log "❌ npm install failed."; return 1; }
+
+    if ! clean_npm_install "$APP_INSTALL_DIR"; then
+        log "❌ npm install failed."
+        rollback "$INSTALLED_VERSION"
+        return 1
+    fi
     write_env_server_details ;
     check_pm2
     # ---------------------------------------------------
@@ -2679,53 +2291,6 @@ INNEREOF
 # ------------------------------------------------
 # Restart PM2 Service
 # ------------------------------------------------
-# restart_pm2_service() {
-#     local VERSION_NAME=$(jq -r '.installedVersion // empty' "$CONFIG_PATH")
-#     if [ -z "$VERSION_NAME" ]; then
-#         echo "❌ No installed version found in config. Cannot restart PM2 service."
-#         return 1
-#     fi
-#     if ! command -v pm2 >/dev/null 2>&1; then
-#         echo "❌ pm2 not installed. Cannot restart service."
-#         return 1
-#     fi
-
-#     if [ ! -d "$APP_INSTALL_DIR" ]; then
-#         echo "❌ App install directory not found: $APP_INSTALL_DIR"
-#         return 1
-#     fi
-
-#     # Prefer restarting via ecosystem file inside the app dir
-#     if [ -f "$APP_INSTALL_DIR/ecosystem.config.cjs" ]; then
-#         echo "🔄 Restarting PM2 using ecosystem.config.cjs in $APP_INSTALL_DIR..."
-#         (cd "$APP_INSTALL_DIR" && pm2 restart ecosystem.config.cjs) || {
-#             echo "❌ Failed to restart using ecosystem.config.cjs"
-#             return 1
-#         }
-#     elif [ -f "$APP_INSTALL_DIR/ecosystem.config.js" ]; then
-#         echo "🔄 Restarting PM2 using ecosystem.config.js in $APP_INSTALL_DIR..."
-#         (cd "$APP_INSTALL_DIR" && pm2 restart ecosystem.config.js) || {
-#             echo "❌ Failed to restart using ecosystem.config.js"
-#             return 1
-#         }
-#     else
-#         # Fallback to named process restart
-#         local PM2_PROC="hiretrack-$VERSION_NAME"
-#         echo "⚠️  No ecosystem file found. Falling back to pm2 restart $PM2_PROC"
-#         if pm2 list 2>/dev/null | grep -Fq "$PM2_PROC"; then
-#             pm2 restart "$PM2_PROC" || {
-#                 echo "❌ Failed to restart PM2 process $PM2_PROC"
-#                 return 1
-#             }
-#         else
-#             echo "⚠ PM2 process '$PM2_PROC' not found. Nothing to restart."
-#             pm2 start ecosystem.cjs
-#             return 0
-#         fi
-#     fi
-#     pm2 save --force
-#     echo "✅ PM2 service hiretrack-$VERSION_NAME restarted successfully."
-# }
 restart_pm2_service() {
     local MATCHING_PROCS
     local ECOSYSTEM_FILE=""
@@ -2767,29 +2332,6 @@ restart_pm2_service() {
     fi
 }
 
-# # ------------------------------------------------
-# # Cron Setup
-# # ------------------------------------------------
-# setup_cron() {
-#     local OS_TYPE=$(uname | tr '[:upper:]' '[:lower:]')
-#     local CRON_NAME="hiretrack-autoupdate"
-#     local CRON_ENTRY="*/2 * * * * PATH=/usr/local/bin:/usr/bin:/bin bash $SCRIPT_PATH --update >> $CRON_LOG_FILE 2>&1"
-
-#     if [[ "$OS_TYPE" == "linux" || "$OS_TYPE" == "darwin" ]]; then
-#         local CURRENT_CRON=$(crontab -l 2>/dev/null || echo "")
-
-#         # Check if the exact cron command already exists
-#         if ! echo "$CURRENT_CRON" | grep -Fq "$CRON_ENTRY"; then
-#             # Append comment and cron command
-#             (echo "$CURRENT_CRON"; echo "# CRON_NAME:$CRON_NAME"; echo "$CRON_ENTRY") | crontab -
-#             echo "✅ Cron job '$CRON_NAME' added. Logs: $CRON_LOG_FILE"
-#         else
-#             echo "✅ Cron job '$CRON_NAME' already exists. Logs: $CRON_LOG_FILE"
-#         fi
-#     else
-#         echo "❌ Unsupported OS: $OS_TYPE. Cannot setup cron."
-#     fi
-# }
 # ------------------------------------------------
 # Cron Setup
 # ------------------------------------------------
@@ -2906,16 +2448,29 @@ case "${1:-}" in
         echo "  $0 [command] [options]"
         echo
         echo "Commands:"
-        echo "  --install [email]             Install the application (optionally register with email)"
         echo "  --update [mode]               Check for and install updates"
+        echo "                                Use 'manually' to skip auto-update validation check"
         echo "                                Example: $0 --update manually"
+        echo
         echo "  --run-migrations [from] [to]  Run database migrations between versions"
         echo "                                Example: $0 --run-migrations 2.2.25 2.2.26"
+        echo
         echo "  --rollback [version]          Roll back to a specific or previous version"
         echo "                                Example: $0 --rollback 2.2.25"
+        echo
         echo "  --setup-cron                  Set up automatic update cron job"
+        echo "                                Configures cron to check for updates automatically"
+        echo
         echo "  --domain                      Configure domain and Nginx setup"
-        echo "  --update-license [key]        Update the license key manually"
+        echo "                                Sets up domain, SSL certificate, and Nginx reverse proxy"
+        echo
+        echo "  --update-license [email]      Update the license key manually"
+        echo "                                Only changes the machine code, email remains unchanged"
+        echo "                                Example: $0 --update-license user@example.com"
+        echo
+        echo "  --register [email]           Register a new license key"
+        echo "                                Example: $0 --register user@example.com"
+        echo
         echo "  --help                        Show this help message and exit"
         echo
         exit 0
