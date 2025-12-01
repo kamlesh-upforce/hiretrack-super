@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useMemo, useState, useEffect, useRef } from "react";
+import React, { useMemo, useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import {
   ArrowLeft,
@@ -96,6 +96,22 @@ export default function ClientDetailComponent({
   >(null);
   const licenseActionTypeRef = useRef<"activate" | "deactivate" | null>(null);
 
+  // Pagination states
+  const [validationHistorySkip, setValidationHistorySkip] = useState(0);
+  const [validationHistoryHasMore, setValidationHistoryHasMore] = useState(true);
+  const [loadingMoreValidationHistory, setLoadingMoreValidationHistory] =
+    useState(false);
+  const validationHistoryObserverRef = useRef<HTMLDivElement>(null);
+
+  const [historySkip, setHistorySkip] = useState(0);
+  const [historyHasMore, setHistoryHasMore] = useState(true);
+  const [loadingMoreHistory, setLoadingMoreHistory] = useState(false);
+  const historyObserverRef = useRef<HTMLDivElement>(null);
+
+  const [revokedLicensesDisplayCount, setRevokedLicensesDisplayCount] =
+    useState(5);
+  const revokedLicensesObserverRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
     const fetchClientDetails = async () => {
       try {
@@ -118,18 +134,26 @@ export default function ClientDetailComponent({
           setLicenses([]);
         }
 
-        // Fetch history for this client
+        // Fetch history for this client (initial load)
         let clientHistory: IHistory[] = [];
         try {
-          const historyData = await api.get<IHistory[]>(
-            `/api/history/read?entityType=client&entityId=${id}`
-          );
-          clientHistory = Array.isArray(historyData) ? historyData : [];
+          const historyResponse = await api.get<{
+            data: IHistory[];
+            pagination: { skip: number; limit: number; total: number; hasMore: boolean };
+          }>(`/api/history/read?entityType=client&entityId=${id}&limit=20&skip=0`);
+          if (historyResponse && typeof historyResponse === "object" && "data" in historyResponse) {
+            clientHistory = Array.isArray(historyResponse.data) ? historyResponse.data : [];
+            setHistorySkip(historyResponse.pagination.skip + historyResponse.pagination.limit);
+            setHistoryHasMore(historyResponse.pagination.hasMore);
+          } else {
+            // Backward compatibility
+            clientHistory = Array.isArray(historyResponse) ? historyResponse : [];
+          }
         } catch {
           // If no history found, set empty array
         }
 
-        // Fetch history for all licenses of this client
+        // Fetch history for all licenses of this client (initial load)
         let licenseHistory: IHistory[] = [];
         if (licensesList.length > 0) {
           try {
@@ -137,14 +161,20 @@ export default function ClientDetailComponent({
               .map((l) => idToString(l._id))
               .filter(Boolean);
             const licenseHistoryPromises = licenseIds.map((licenseId) =>
-              api.get<IHistory[]>(
-                `/api/history/read?entityType=license&entityId=${licenseId}`
-              )
+              api.get<{
+                data: IHistory[];
+                pagination: { skip: number; limit: number; total: number; hasMore: boolean };
+              }>(`/api/history/read?entityType=license&entityId=${licenseId}&limit=20&skip=0`)
             );
             const licenseHistoryResults = await Promise.all(
               licenseHistoryPromises
             );
-            licenseHistory = licenseHistoryResults.flat();
+            licenseHistory = licenseHistoryResults.flatMap((result) => {
+              if (result && typeof result === "object" && "data" in result) {
+                return Array.isArray(result.data) ? result.data : [];
+              }
+              return Array.isArray(result) ? result : [];
+            });
           } catch {
             // Ignore errors for license history
           }
@@ -157,14 +187,21 @@ export default function ClientDetailComponent({
         );
         setHistory(allHistory);
 
-        // Fetch validation history for this client's email
+        // Fetch validation history for this client's email (initial load)
         try {
-          const validationHistoryData = await api.get<IValidationHistory[]>(
-            `/api/validation-history/read?email=${clientData?.email}&limit=50`
-          );
-          setValidationHistory(
-            Array.isArray(validationHistoryData) ? validationHistoryData : []
-          );
+          const validationHistoryResponse = await api.get<{
+            data: IValidationHistory[];
+            pagination: { skip: number; limit: number; total: number; hasMore: boolean };
+          }>(`/api/validation-history/read?email=${clientData?.email}&limit=20&skip=0`);
+          if (validationHistoryResponse && typeof validationHistoryResponse === "object" && "data" in validationHistoryResponse) {
+            const validationData = Array.isArray(validationHistoryResponse.data) ? validationHistoryResponse.data : [];
+            setValidationHistory(validationData);
+            setValidationHistorySkip(validationHistoryResponse.pagination.skip + validationHistoryResponse.pagination.limit);
+            setValidationHistoryHasMore(validationHistoryResponse.pagination.hasMore);
+          } else {
+            // Backward compatibility
+            setValidationHistory(Array.isArray(validationHistoryResponse) ? validationHistoryResponse : []);
+          }
         } catch {
           // If no validation history found, set empty array
           setValidationHistory([]);
@@ -217,39 +254,8 @@ export default function ClientDetailComponent({
         // Keep previous licenses if fetch fails
       }
 
-      // Refetch history for client and licenses
-      try {
-        const historyData = await api.get<IHistory[]>(
-          `/api/history/read?entityType=client&entityId=${id}`
-        );
-        const clientHistory = Array.isArray(historyData) ? historyData : [];
-
-        // Also fetch license history
-        if (licenses.length > 0) {
-          const licenseIds = licenses
-            .map((l) => idToString(l._id))
-            .filter(Boolean);
-          const licenseHistoryPromises = licenseIds.map((licenseId) =>
-            api.get<IHistory[]>(
-              `/api/history/read?entityType=license&entityId=${licenseId}`
-            )
-          );
-          const licenseHistoryResults = await Promise.all(
-            licenseHistoryPromises
-          );
-          const licenseHistory = licenseHistoryResults.flat();
-
-          const allHistory = [...clientHistory, ...licenseHistory].sort(
-            (a, b) =>
-              new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-          );
-          setHistory(allHistory);
-        } else {
-          setHistory(clientHistory);
-        }
-      } catch {
-        // Ignore errors
-      }
+      // Refresh history and licenses using the refresh function
+      await refreshLicenseAndHistory();
     } catch (err) {
       setError(
         err instanceof Error ? err.message : `Failed to ${action} client`
@@ -286,28 +292,40 @@ export default function ClientDetailComponent({
         .map((l) => idToString(l._id))
         .filter(Boolean);
 
+      // Reset pagination and fetch initial data
       let clientHistory: IHistory[] = [];
       try {
-        const clientHistoryData = await api.get<IHistory[]>(
-          `/api/history/read?entityType=client&entityId=${id}`
-        );
-        clientHistory = Array.isArray(clientHistoryData)
-          ? clientHistoryData
-          : [];
+        const clientHistoryResponse = await api.get<{
+          data: IHistory[];
+          pagination: { skip: number; limit: number; total: number; hasMore: boolean };
+        }>(`/api/history/read?entityType=client&entityId=${id}&limit=20&skip=0`);
+        if (clientHistoryResponse && typeof clientHistoryResponse === "object" && "data" in clientHistoryResponse) {
+          clientHistory = Array.isArray(clientHistoryResponse.data) ? clientHistoryResponse.data : [];
+          setHistorySkip(clientHistoryResponse.pagination.skip + clientHistoryResponse.pagination.limit);
+          setHistoryHasMore(clientHistoryResponse.pagination.hasMore);
+        } else {
+          clientHistory = Array.isArray(clientHistoryResponse) ? clientHistoryResponse : [];
+        }
       } catch {
         clientHistory = [];
       }
 
       if (licenseIds.length > 0) {
         const licenseHistoryPromises = licenseIds.map((licenseId) =>
-          api.get<IHistory[]>(
-            `/api/history/read?entityType=license&entityId=${licenseId}`
-          )
+          api.get<{
+            data: IHistory[];
+            pagination: { skip: number; limit: number; total: number; hasMore: boolean };
+          }>(`/api/history/read?entityType=license&entityId=${licenseId}&limit=20&skip=0`)
         );
         const licenseHistoryResults = await Promise.all(
           licenseHistoryPromises
         );
-        const licenseHistory = licenseHistoryResults.flat();
+        const licenseHistory = licenseHistoryResults.flatMap((result) => {
+          if (result && typeof result === "object" && "data" in result) {
+            return Array.isArray(result.data) ? result.data : [];
+          }
+          return Array.isArray(result) ? result : [];
+        });
 
         const allHistory = [...clientHistory, ...licenseHistory].sort(
           (a, b) =>
@@ -316,20 +334,27 @@ export default function ClientDetailComponent({
         setHistory(allHistory);
 
         try {
-          const validationHistoryData = await api.get<IValidationHistory[]>(
-            `/api/validation-history/read?email=${client.email}&limit=50`
-          );
-          setValidationHistory(
-            Array.isArray(validationHistoryData)
-              ? validationHistoryData
-              : []
-          );
+          const validationHistoryResponse = await api.get<{
+            data: IValidationHistory[];
+            pagination: { skip: number; limit: number; total: number; hasMore: boolean };
+          }>(`/api/validation-history/read?email=${client.email}&limit=20&skip=0`);
+          if (validationHistoryResponse && typeof validationHistoryResponse === "object" && "data" in validationHistoryResponse) {
+            const validationData = Array.isArray(validationHistoryResponse.data) ? validationHistoryResponse.data : [];
+            setValidationHistory(validationData);
+            setValidationHistorySkip(validationHistoryResponse.pagination.skip + validationHistoryResponse.pagination.limit);
+            setValidationHistoryHasMore(validationHistoryResponse.pagination.hasMore);
+          } else {
+            setValidationHistory(Array.isArray(validationHistoryResponse) ? validationHistoryResponse : []);
+          }
         } catch {
           // Ignore validation history errors
         }
       } else {
         setHistory(clientHistory);
       }
+
+      // Reset revoked licenses display count
+      setRevokedLicensesDisplayCount(5);
     } catch {
       // Keep existing state if refresh fails
     }
@@ -482,6 +507,182 @@ export default function ClientDetailComponent({
     () => licenses.filter((license) => license.status === "revoked"),
     [licenses]
   );
+
+  const displayedRevokedLicenses = useMemo(
+    () => revokedLicenses.slice(0, revokedLicensesDisplayCount),
+    [revokedLicenses, revokedLicensesDisplayCount]
+  );
+
+  // Load more validation history
+  const loadMoreValidationHistory = useCallback(async () => {
+    if (!client || loadingMoreValidationHistory || !validationHistoryHasMore) {
+      return;
+    }
+
+    try {
+      setLoadingMoreValidationHistory(true);
+      const response = await api.get<{
+        data: IValidationHistory[];
+        pagination: { skip: number; limit: number; total: number; hasMore: boolean };
+      }>(`/api/validation-history/read?email=${client.email}&limit=20&skip=${validationHistorySkip}`);
+
+      if (response && typeof response === "object" && "data" in response) {
+        const newData = Array.isArray(response.data) ? response.data : [];
+        setValidationHistory((prev) => [...prev, ...newData]);
+        setValidationHistorySkip(response.pagination.skip + response.pagination.limit);
+        setValidationHistoryHasMore(response.pagination.hasMore);
+      }
+    } catch (err) {
+      console.error("Error loading more validation history:", err);
+    } finally {
+      setLoadingMoreValidationHistory(false);
+    }
+  }, [client, loadingMoreValidationHistory, validationHistoryHasMore, validationHistorySkip]);
+
+  // Load more activity history
+  const loadMoreHistory = useCallback(async () => {
+    if (!client || loadingMoreHistory || !historyHasMore) {
+      return;
+    }
+
+    try {
+      setLoadingMoreHistory(true);
+
+      // Fetch more client history
+      const clientHistoryResponse = await api.get<{
+        data: IHistory[];
+        pagination: { skip: number; limit: number; total: number; hasMore: boolean };
+      }>(`/api/history/read?entityType=client&entityId=${id}&limit=20&skip=${historySkip}`);
+
+      let newClientHistory: IHistory[] = [];
+      if (clientHistoryResponse && typeof clientHistoryResponse === "object" && "data" in clientHistoryResponse) {
+        newClientHistory = Array.isArray(clientHistoryResponse.data) ? clientHistoryResponse.data : [];
+      }
+
+      // Fetch more license history
+      let newLicenseHistory: IHistory[] = [];
+      if (licenses.length > 0) {
+        const licenseIds = licenses
+          .map((l) => idToString(l._id))
+          .filter(Boolean);
+        const licenseHistoryPromises = licenseIds.map((licenseId) =>
+          api.get<{
+            data: IHistory[];
+            pagination: { skip: number; limit: number; total: number; hasMore: boolean };
+          }>(`/api/history/read?entityType=license&entityId=${licenseId}&limit=20&skip=${historySkip}`)
+        );
+        const licenseHistoryResults = await Promise.all(licenseHistoryPromises);
+        newLicenseHistory = licenseHistoryResults.flatMap((result) => {
+          if (result && typeof result === "object" && "data" in result) {
+            return Array.isArray(result.data) ? result.data : [];
+          }
+          return Array.isArray(result) ? result : [];
+        });
+      }
+
+      // Combine and sort
+      const newHistory = [...newClientHistory, ...newLicenseHistory].sort(
+        (a, b) =>
+          new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+      );
+
+      setHistory((prev) => {
+        const combined = [...prev, ...newHistory];
+        // Remove duplicates based on _id
+        const unique = combined.filter(
+          (item, index, self) =>
+            index === self.findIndex((t) => t._id === item._id)
+        );
+        return unique.sort(
+          (a, b) =>
+            new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+        );
+      });
+
+      // Update pagination state (use client history as reference)
+      if (clientHistoryResponse && typeof clientHistoryResponse === "object" && "data" in clientHistoryResponse) {
+        setHistorySkip(clientHistoryResponse.pagination.skip + clientHistoryResponse.pagination.limit);
+        setHistoryHasMore(clientHistoryResponse.pagination.hasMore);
+      }
+    } catch (err) {
+      console.error("Error loading more history:", err);
+    } finally {
+      setLoadingMoreHistory(false);
+    }
+  }, [client, id, licenses, loadingMoreHistory, historyHasMore, historySkip]);
+
+  // Intersection Observer for Validation History
+  useEffect(() => {
+    if (!validationHistoryHasMore || loadingMoreValidationHistory) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting && validationHistoryHasMore && !loadingMoreValidationHistory) {
+          loadMoreValidationHistory();
+        }
+      },
+      { threshold: 0.1 }
+    );
+
+    const currentRef = validationHistoryObserverRef.current;
+    if (currentRef) {
+      observer.observe(currentRef);
+    }
+
+    return () => {
+      if (currentRef) {
+        observer.unobserve(currentRef);
+      }
+    };
+  }, [validationHistoryHasMore, loadingMoreValidationHistory, loadMoreValidationHistory]);
+
+  // Intersection Observer for Activity History
+  useEffect(() => {
+    if (!historyHasMore || loadingMoreHistory) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting && historyHasMore && !loadingMoreHistory) {
+          loadMoreHistory();
+        }
+      },
+      { threshold: 0.1 }
+    );
+
+    const currentRef = historyObserverRef.current;
+    if (currentRef) {
+      observer.observe(currentRef);
+    }
+
+    return () => {
+      if (currentRef) {
+        observer.unobserve(currentRef);
+      }
+    };
+  }, [historyHasMore, loadingMoreHistory, loadMoreHistory]);
+
+  // Intersection Observer for Revoked Licenses
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting && revokedLicensesDisplayCount < revokedLicenses.length) {
+          setRevokedLicensesDisplayCount((prev) => Math.min(prev + 5, revokedLicenses.length));
+        }
+      },
+      { threshold: 0.1 }
+    );
+
+    const currentRef = revokedLicensesObserverRef.current;
+    if (currentRef) {
+      observer.observe(currentRef);
+    }
+
+    return () => {
+      if (currentRef) {
+        observer.unobserve(currentRef);
+      }
+    };
+  }, [revokedLicenses.length, revokedLicensesDisplayCount]);
 
   if (loading) {
     return (
@@ -831,7 +1032,7 @@ export default function ClientDetailComponent({
                   </p>
                 </div>
                 <div className="space-y-3 max-h-96 overflow-y-auto">
-                  {revokedLicenses.map((license) => (
+                  {displayedRevokedLicenses.map((license) => (
                     <div
                       key={license._id?.toString() || license.licenseKey}
                       className="border border-red-200 dark:border-red-800 rounded-lg p-3 bg-red-50 dark:bg-red-900/10"
@@ -864,6 +1065,14 @@ export default function ClientDetailComponent({
                       )}
                     </div>
                   ))}
+                  {revokedLicensesDisplayCount < revokedLicenses.length && (
+                    <div
+                      ref={revokedLicensesObserverRef}
+                      className="flex justify-center py-2"
+                    >
+                      <LoadingSpinner size="sm" />
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -942,6 +1151,20 @@ export default function ClientDetailComponent({
                       </div>
                     </div>
                   ))}
+                  {validationHistoryHasMore && (
+                    <div
+                      ref={validationHistoryObserverRef}
+                      className="flex justify-center py-2"
+                    >
+                      {loadingMoreValidationHistory ? (
+                        <LoadingSpinner size="sm" />
+                      ) : (
+                        <div className="text-xs text-gray-500 dark:text-gray-400">
+                          Loading more...
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="text-center py-6 border border-dashed border-gray-300 dark:border-gray-600 rounded-lg bg-gray-50 dark:bg-gray-700/30">
@@ -1009,6 +1232,20 @@ export default function ClientDetailComponent({
                     </div>
                   </div>
                 ))}
+                {historyHasMore && (
+                  <div
+                    ref={historyObserverRef}
+                    className="flex justify-center py-2"
+                  >
+                    {loadingMoreHistory ? (
+                      <LoadingSpinner size="sm" />
+                    ) : (
+                      <div className="text-xs text-gray-500 dark:text-gray-400">
+                        Loading more...
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             ) : (
               <div className="text-center py-8">

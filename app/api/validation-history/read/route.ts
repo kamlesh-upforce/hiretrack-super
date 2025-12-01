@@ -10,7 +10,8 @@ export async function GET(req: Request) {
     const licenseKey = searchParams.get("licenseKey");
     const licenseId = searchParams.get("licenseId");
     const email = searchParams.get("email");
-    const limit = parseInt(searchParams.get("limit") || "50");
+    const limit = parseInt(searchParams.get("limit") || "20");
+    const skip = parseInt(searchParams.get("skip") || "0");
 
     if (!licenseKey && !licenseId && !email) {
       return NextResponse.json(
@@ -31,12 +32,25 @@ export async function GET(req: Request) {
       query.email = email;
     }
 
+    // Get total count for pagination
+    const total = await ValidationHistory.countDocuments(query);
+
     // Fetch validation history, sorted by most recent first
     const history = await ValidationHistory.find(query)
       .sort({ createdAt: -1 })
+      .skip(skip)
       .limit(limit);
 
-    return NextResponse.json(history);
+    // Return paginated response
+    return NextResponse.json({
+      data: history,
+      pagination: {
+        skip,
+        limit,
+        total,
+        hasMore: skip + limit < total,
+      },
+    });
   } catch (error) {
     console.error("Error retrieving validation history:", error);
     return NextResponse.json(
