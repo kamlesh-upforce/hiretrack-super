@@ -2,12 +2,11 @@ import crypto from "crypto";
 import License from "@/app/models/license";
 import ValidationHistory from "@/app/models/validationHistory";
 import { connectToDatabase } from "./db";
-
+import { GITHUB_API_URL, GITHUB_PAT } from "@/app/configs/github.config";
 
 // Generate a unique license key
 export function generateLicenseKey(email: string, machineCode: string): string {
   const secret = process.env.LICENSE_SECRET || "development-secret";
-
 
   // Add cryptographically random salt (nonce)
   const nonce = crypto.randomBytes(8).toString("hex"); // 16 hex chars
@@ -28,7 +27,6 @@ export function safeJson<T>(value: unknown): T {
   return value as T;
 }
 
-
 /**
  * Verify a given license key.
  * Returns { valid: boolean, reason?: string, nonce?: string }
@@ -39,7 +37,8 @@ export function verifyLicenseKey(
   machineCode: string
 ): { valid: boolean; reason?: string; nonce?: string } {
   if (!key) return { valid: false, reason: "no key provided" };
-  if (!email || !machineCode) return { valid: false, reason: "email/machineCode missing" };
+  if (!email || !machineCode)
+    return { valid: false, reason: "email/machineCode missing" };
 
   const raw = key.replace(/-/g, "").toLowerCase();
   const secret = process.env.LICENSE_SECRET || "development-secret";
@@ -106,13 +105,23 @@ export async function validateLicense(
       });
       return validationResult;
     }
-    const validateLicense = verifyLicenseKey(licenseKey, license.email, machineCode);
+    const validateLicense = verifyLicenseKey(
+      licenseKey,
+      license.email,
+      machineCode
+    );
     if (!validateLicense.valid) {
-      return { valid: false, message: validateLicense.reason || "Invalid license key" };
+      return {
+        valid: false,
+        message: validateLicense.reason || "Invalid license key",
+      };
     }
     // Check if the license is active
     if (license.status !== "active") {
-      validationResult = { valid: false, message: `License is ${license.status}` };
+      validationResult = {
+        valid: false,
+        message: `License is ${license.status}`,
+      };
       // Log failed validation
       await ValidationHistory.create({
         licenseKey,
@@ -173,18 +182,27 @@ export async function validateLicense(
     // Fetch the asset from GitHub releases
     let assetUrl: string | undefined = undefined;
     try {
-      const response = await fetch(
-        "https://api.github.com/repos/rahulp162/hiretrack-release/releases"
-      );
+      // "https://api.github.com/repos/rahulp162/hiretrack-release/releases"
+
+      const githubHeaders: Record<string, string> = {
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "License-Admin-App",
+      };
+
+      if (GITHUB_PAT) {
+        githubHeaders.Authorization = `Bearer ${GITHUB_PAT}`;
+      }
+
+      const response = await fetch(GITHUB_API_URL, { headers: githubHeaders });
       if (!response.ok) {
         throw new Error("Failed to fetch release data from GitHub");
       }
-      const releases = await response.json() as Array<{
+      const releases = (await response.json()) as Array<{
         tag_name: string;
         assets?: Array<{ browser_download_url?: string }>;
       }>;
 
-      let release: typeof releases[0] | undefined;
+      let release: (typeof releases)[0] | undefined;
       if (installedVersion) {
         // Try to find a release with tag_name matching v{installedVersion} or {installedVersion}
         release =

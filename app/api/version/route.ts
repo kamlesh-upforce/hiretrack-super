@@ -1,4 +1,19 @@
 import { NextResponse } from "next/server";
+import { GITHUB_API_URL, GITHUB_PAT } from "@/app/configs/github.config";
+
+type GithubAsset = {
+  name: string;
+  browser_download_url?: string;
+  size?: number;
+};
+
+type GithubRelease = {
+  tag_name: string;
+  assets?: GithubAsset[];
+  body?: string;
+  published_at?: string;
+  html_url?: string;
+};
 
 // GET: Fetch version information and download URL from GitHub releases
 export async function GET(req: Request) {
@@ -14,16 +29,19 @@ export async function GET(req: Request) {
       );
     }
 
+    const githubHeaders: Record<string, string> = {
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "License-Admin-App",
+    };
+
+    if (GITHUB_PAT) {
+      githubHeaders.Authorization = `Bearer ${GITHUB_PAT}`;
+    }
+
     // Fetch releases from GitHub API
-    const githubResponse = await fetch(
-      "https://api.github.com/repos/rahulp162/hiretrack-release/releases",
-      {
-        headers: {
-          Accept: "application/vnd.github.v3+json",
-          "User-Agent": "License-Admin-App",
-        },
-      }
-    );
+    const githubResponse = await fetch(GITHUB_API_URL, {
+      headers: githubHeaders,
+    });
 
     if (!githubResponse.ok) {
       return NextResponse.json(
@@ -32,10 +50,10 @@ export async function GET(req: Request) {
       );
     }
 
-    const releases = await githubResponse.json();
+    const releases = (await githubResponse.json()) as GithubRelease[];
 
     // Find the specific version
-    const targetRelease = releases.find((release: any) => {
+    const targetRelease = releases.find((release) => {
       // Remove 'v' prefix if present and compare versions
       const releaseVersion = release.tag_name.replace(/^v/, "");
       return releaseVersion === version;
@@ -49,7 +67,7 @@ export async function GET(req: Request) {
     }
 
     // Find the appropriate asset based on platform
-    let asset = null;
+    let asset: GithubAsset | null = null;
     const assets = targetRelease.assets || [];
 
     // Define platform-specific file patterns
@@ -64,12 +82,12 @@ export async function GET(req: Request) {
       platformPatterns.windows;
 
     // Find asset matching the platform
-    asset = assets.find((asset: any) => {
+    asset = assets.find((asset) => {
       const fileName = asset.name.toLowerCase();
       return patterns.some((pattern) =>
         fileName.includes(pattern.toLowerCase())
       );
-    });
+    }) || null;
 
     // If no platform-specific asset found, return the first available asset
     if (!asset && assets.length > 0) {
