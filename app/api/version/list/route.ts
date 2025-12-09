@@ -1,34 +1,5 @@
+import { GITHUB_API_URL, GITHUB_PAT } from "@/app/configs/github.config";
 import { NextResponse } from "next/server";
-import { GITHUB_PAT, GITHUB_API_URL } from "@/app/configs/github.config";
-
-type GithubAsset = {
-  name: string;
-  browser_download_url?: string;
-};
-
-type GithubRelease = {
-  tag_name: string;
-  assets?: GithubAsset[];
-  prerelease?: boolean;
-  draft?: boolean;
-  body?: string;
-  published_at?: string;
-  html_url?: string;
-};
-
-type VersionInfo = {
-  version: string;
-  tagName: string;
-  platforms: string[];
-  publishedAt?: string;
-  isPrerelease?: boolean;
-  isDraft?: boolean;
-  releaseNotes?: string;
-  releaseUrl?: string;
-  assetCount: number;
-  asset: string | null;
-  migrationScriptUrl: string | null;
-};
 
 // Utility function to compare semantic versions
 function compareVersions(a: string, b: string) {
@@ -70,27 +41,17 @@ export async function GET(req: Request) {
     const currentVersion = searchParams.get("currentVersion");
     const upgradeVersion = searchParams.get("upgradeVersion");
 
-    const githubHeaders: Record<string, string> = {
-      Accept: "application/vnd.github.v3+json",
-      "User-Agent": "License-Admin-App",
-    };
-
-    if (GITHUB_PAT) {
-      githubHeaders.Authorization = `Bearer ${GITHUB_PAT}`;
-    }
-
-    console.log("GITHUB_API_URL", GITHUB_API_URL , GITHUB_PAT);
-    
     const githubResponse = await fetch(
       GITHUB_API_URL,
       {
-        headers: githubHeaders,
+        headers: {
+          Accept: "application/vnd.github.v3+json",
+          "User-Agent": "License-Admin-App",
+          Authorization: `Bearer ${GITHUB_PAT}`,
+        },
       }
     );
-    console.log("githubResponse", githubResponse);
 
-    console.log("githubResponse.ok", await githubResponse.json());
-    
     if (!githubResponse.ok) {
       return NextResponse.json(
         { error: "Failed to fetch releases from GitHub" },
@@ -98,19 +59,19 @@ export async function GET(req: Request) {
       );
     }
 
-    const releases = (await githubResponse.json()) as GithubRelease[];
+    const releases = await githubResponse.json();
 
-    let versions: VersionInfo[] = releases.map((release) => {
+    let versions = releases.map((release: any) => {
       const version = release.tag_name.replace(/^v/, "");
       const assets = release.assets || [];
 
       const platforms: string[] = [];
-      if (assets.some((a) => a.name.toLowerCase().includes(".exe") || a.name.toLowerCase().includes("windows"))) platforms.push("windows");
-      if (assets.some((a) => a.name.toLowerCase().includes(".dmg") || a.name.toLowerCase().includes("mac"))) platforms.push("mac");
-      if (assets.some((a) => a.name.toLowerCase().includes(".deb") || a.name.toLowerCase().includes(".rpm") || a.name.toLowerCase().includes("linux"))) platforms.push("linux");
+      if (assets.some((a: any) => a.name.toLowerCase().includes(".exe") || a.name.toLowerCase().includes("windows"))) platforms.push("windows");
+      if (assets.some((a: any) => a.name.toLowerCase().includes(".dmg") || a.name.toLowerCase().includes("mac"))) platforms.push("mac");
+      if (assets.some((a: any) => a.name.toLowerCase().includes(".deb") || a.name.toLowerCase().includes(".rpm") || a.name.toLowerCase().includes("linux"))) platforms.push("linux");
 
       let migrationScriptUrl = null;
-      const migrationAsset = assets.find((asset) =>
+      const migrationAsset = assets.find((asset: any) =>
         asset.name.includes("migrationScriptUrl")
       );
       if (migrationAsset) {
@@ -130,16 +91,16 @@ export async function GET(req: Request) {
         releaseUrl: release.html_url,
         assetCount: assets.length,
         asset,
-        migrationScriptUrl: migrationScriptUrl ?? null,
+        migrationScriptUrl,
       };
     });
 
     // ✅ Apply version range filter if provided
     if (currentVersion || upgradeVersion) {
       versions = versions
-        .filter((v: VersionInfo) => isVersionInRange(v.version, currentVersion!, upgradeVersion!))
+        .filter((v: any) => isVersionInRange(v.version, currentVersion!, upgradeVersion!))
         // ✅ Sort ascending only when filters exist
-        .sort((a: VersionInfo, b: VersionInfo) => compareVersions(a.version, b.version));
+        .sort((a: any, b: any) => compareVersions(a.version, b.version));
     }
 
     return NextResponse.json({
