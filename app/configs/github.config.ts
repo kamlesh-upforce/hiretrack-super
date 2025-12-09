@@ -1,2 +1,2 @@
-export const GITHUB_PAT = process.env.GITHUB_PAT || "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"
+export const GITHUB_PAT = process.env.GITHUB_PAT; 
 export const GITHUB_API_URL = "https://api.github.com/repos/vipul-upforce/hiretrack-publish/releases";
