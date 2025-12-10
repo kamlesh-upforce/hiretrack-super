@@ -13,6 +13,8 @@ const publicApiRoutes = [
   "/api/license/update",
   "/api/license/generate",
   "/api/license/verify",
+  "/api/client/verify",
+  "/api/asset/download",
 ];
 
 // List of public pages that don't require authetication
