@@ -157,7 +157,7 @@ export async function validateLicense(
     }
 
     // Check if the license is active
-    if (license.status !== "active") {
+    if (license.status !== "active" && license.status !== "revoked") {
       validationResult = {
         valid: false,
         message: `License is ${license.status}`,
