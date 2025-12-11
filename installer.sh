@@ -21,7 +21,7 @@ API_URL="https://hiretrack-super-j6ca.vercel.app/api/license/register"
 API_URL_UPDATE_LIC="https://hiretrack-super-j6ca.vercel.app/api/license/update"
 LATEST_VERSION_API="https://hiretrack-super-j6ca.vercel.app/api/version/list"
 ASSET_DOWNLOAD_API="https://hiretrack-super-j6ca.vercel.app/api/asset/download"
-
+ASSET_MIGRATION_API="https://hiretrack-super-j6ca.vercel.app/api/migration/download"
 MONGODB_VERSION="${MONGODB_VERSION:-7.0}"
 # NODE_VERSION_DEFAULT=20
 
@@ -87,7 +87,6 @@ get_machine_code() {
     local MAC_ADDR=""
     local PUBLIC_IP=""
 
-    echo "🔍 Generating new machine code using MAC and Public IP..." >&2
 
     # 1. Get MAC Address (First non-loopback, non-virtual interface)
     if [[ "$OS_TYPE" == "linux" ]]; then
@@ -104,11 +103,10 @@ get_machine_code() {
         exit 1
     fi
     MAC_ADDR=$(echo "$MAC_ADDR" | tr -d '[:space:]')
-    echo "   • MAC: ${MAC_ADDR:-N/A}" >&2
 
     # 2. Get Public IP Address
     PUBLIC_IP=$(curl -s ifconfig.me 2>/dev/null || curl -s icanhazip.com 2>/dev/null || echo "0.0.0.0")
-    echo "   • Public IP: $PUBLIC_IP" >&2
+    PUBLIC_IP=$(echo "$PUBLIC_IP" | tr -d '\r\n')
 
     # 3. Combine and Hash (Canonical Code)
     COMBINED_STRING="${MAC_ADDR}_${PUBLIC_IP}"
@@ -116,9 +114,9 @@ get_machine_code() {
     local HASH_RESULT
 
     if command -v shasum >/dev/null 2>&1; then
-        HASH_RESULT=$(echo "$COMBINED_STRING" | shasum -a 256 | awk '{print $1}')
+        HASH_RESULT=$(printf "%s" "$COMBINED_STRING" | shasum -a 256 | awk '{print $1}')
     elif command -v sha256sum >/dev/null 2>&1; then
-        HASH_RESULT=$(echo "$COMBINED_STRING" | sha256sum | awk '{print $1}')
+        HASH_RESULT=$(printf "%s" "$COMBINED_STRING" | sha256sum | awk '{print $1}')
     else
         echo "❌ Hash utility (shasum or sha256sum) not found. Cannot generate final machine code." >&2
         exit 1
@@ -1220,7 +1218,7 @@ run_migrations() {
     # Call migration download API with currentVersion and requiredVersion (target)
     local MIG_RESPONSE
     MIG_RESPONSE="$(curl -s "$ASSET_MIGRATION_API?currentVersion=$CURRENT_VERSION&requiredVersion=$TARGET_VERSION" 2>/dev/null || true)"
-
+    echo "MIG_RESPONSE: $MIG_RESPONSE" | tee -a "$LOG_DIR/migration.log"
     if [ -z "$MIG_RESPONSE" ] || ! echo "$MIG_RESPONSE" | jq . >/dev/null 2>&1; then
         echo "⚠️ Warning: Invalid or empty migration response — skipping migrations." | tee -a "$LOG_DIR/migration.log"
         return 0
@@ -1967,7 +1965,7 @@ setup_nginx() {
 	    # Backup existing configuration
 	    if [ -f "\$NGINX_CONF_FILE" ]; then
 		local BACKUP_FILE="\$NGINX_BACKUP_DIR/\$DOMAIN_NAME.backup.\$(date +%s)"
-		sudo cp "\$NGINX_CONF_FILE" "\$BACKUP_FILE"
+		cp "\$NGINX_CONF_FILE" "\$BACKUP_FILE"
 		echo "📦 Backed up existing config to: \$BACKUP_FILE"
 	    fi
 
@@ -2130,7 +2128,7 @@ INNEREOF
 		if [ -f "\$NGINX_BACKUP_DIR/\$DOMAIN_NAME.backup."* ]; then
 		    local LATEST_BACKUP=\$(ls -t "\$NGINX_BACKUP_DIR"/\$DOMAIN_NAME.backup.* 2>/dev/null | head -n1)
 		    if [ -n "\$LATEST_BACKUP" ]; then
-			sudo cp "\$LATEST_BACKUP" "\$NGINX_CONF_FILE"
+			cp "\$LATEST_BACKUP" "\$NGINX_CONF_FILE"
 			echo "✅ Rolled back to: \$LATEST_BACKUP"
 		    fi
 		fi
@@ -2297,7 +2295,7 @@ INNEREOF
 		local LATEST_BACKUP=\$(ls -t "\$NGINX_BACKUP_DIR"/\$DOMAIN_NAME.backup.* 2>/dev/null | head -n1)
 		if [ -n "\$LATEST_BACKUP" ]; then
 		    echo "🔄 Restoring previous configuration..."
-		    sudo cp "\$LATEST_BACKUP" "\$NGINX_CONF_DIR/\$DOMAIN_NAME" 2>/dev/null || true
+		    cp "\$LATEST_BACKUP" "\$NGINX_CONF_DIR/\$DOMAIN_NAME" 2>/dev/null || true
 		    sudo nginx -t && sudo systemctl reload nginx 2>/dev/null || brew services restart nginx 2>/dev/null
 		fi
 	    fi
