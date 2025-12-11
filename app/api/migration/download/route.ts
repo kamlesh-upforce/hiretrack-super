@@ -13,8 +13,9 @@ type GithubRelease = {
 };
 
 function findMigrationAsset(assets: GithubAsset[] = []) {
+  console.log("assets", assets);
   return assets.find((a) =>
-    a.name.toLowerCase().includes("migrationscripturl")
+    a.name.toLowerCase().includes("migrationscripturl") || a.name.toLowerCase().includes("migrationScriptUrl")
   );
 }
 
@@ -126,6 +127,7 @@ export async function GET(req: Request) {
     console.log("normalized", normalized);  
     for (const entry of normalized) {
       const migrationAsset = findMigrationAsset(entry.release.assets || []);
+      console.log("migrationAsset", migrationAsset);
       if (!migrationAsset || !migrationAsset.browser_download_url) {
         continue;
       }
@@ -137,7 +139,7 @@ export async function GET(req: Request) {
           ...(GITHUB_PAT ? { Authorization: `Bearer ${GITHUB_PAT}` } : {}),
         },
       });
-
+      console.log("assetRes", assetRes);
       if (!assetRes.ok) {
         return NextResponse.json(
           {
@@ -167,7 +169,7 @@ export async function GET(req: Request) {
       currentVersion: currentVersion || null,
       requiredVersion: requiredVersion || null,
       migrations,
-      normalized
+      
     });
   } catch (error: unknown) {
     console.error("Error downloading migration script:", error);
