@@ -4,6 +4,7 @@ import { GITHUB_API_URL, GITHUB_PAT } from "@/app/configs/github.config";
 type GithubAsset = {
   name: string;
   browser_download_url?: string;
+  url?: string;
 };
 
 type GithubRelease = {
@@ -96,7 +97,7 @@ export async function GET(req: Request) {
       // default: latest only
       targetReleases = releases.slice(0, 1);
     }
-    console.log("targetReleases", targetReleases);
+    // console.log("targetReleases", targetReleases);
     if (!targetReleases.length) {
       return NextResponse.json(
         {
@@ -124,20 +125,36 @@ export async function GET(req: Request) {
       size: number;
       contentType: string;
     }> = [];
-    console.log("normalized", normalized);  
+    // console.log("normalized", normalized);  
     for (const entry of normalized) {
       const migrationAsset = findMigrationAsset(entry.release.assets || []);
       console.log("migrationAsset", migrationAsset);
       if (!migrationAsset || !migrationAsset.browser_download_url) {
         continue;
       }
+      const githubHeaders: Record<string, string> = {
+        // GitHub requires the API asset endpoint plus this Accept to serve the binary stream.
+        Accept: "application/octet-stream",
+        "User-Agent": "License-Admin-App",
+      };
 
-      const assetRes = await fetch(migrationAsset.browser_download_url, {
-        headers: {
-          Accept: "application/octet-stream",
-          "User-Agent": "License-Admin-App",
-          ...(GITHUB_PAT ? { Authorization: `Bearer ${GITHUB_PAT}` } : {}),
-        },
+      if (GITHUB_PAT) {
+        githubHeaders.Authorization = `Bearer ${GITHUB_PAT}`;
+      }
+
+      // For private assets, browser_download_url returns 404 even with a PAT.
+      // Use the API asset URL when a PAT is present; otherwise fall back to the public URL.
+      const assetUrl =
+        GITHUB_PAT && migrationAsset.url
+          ? migrationAsset.url
+          : migrationAsset.browser_download_url;
+
+      if (!assetUrl) {
+        continue;
+      }
+
+      const assetRes = await fetch(assetUrl, {
+        headers: githubHeaders,
       });
       console.log("assetRes", assetRes);
       if (!assetRes.ok) {
