@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { connectToDatabase } from "@/lib/db";
-import Client from "@/app/models/client";
+import { validateLicense } from "@/lib/license";
 import {
   GITHUB_API_URL,
   GITHUB_PAT,
@@ -19,36 +19,101 @@ type GithubRelease = {
   assets?: GithubAsset[];
 };
 
-// GET: Download asset from GitHub after verifying client
+// GET: Download asset from GitHub after verifying license
 export async function GET(req: Request) {
   try {
     await connectToDatabase();
     const { searchParams } = new URL(req.url);
-    const email = searchParams.get("email");
-    const version = searchParams.get("version");
+    const licenseKey = searchParams.get("licenseKey");
+    const machineCode = searchParams.get("machineCode");
+    const installedVersion = searchParams.get("installedVersion") || searchParams.get("version");
 
-    // Validate email is provided
-    if (!email) {
+    // Validate required parameters
+    if (!licenseKey || !machineCode) {
       return NextResponse.json(
-        { status: false, error: "Email parameter is required" },
+        {
+          status: false,
+          error: "licenseKey and machineCode parameters are required",
+        },
         { status: 400 }
       );
     }
 
-    // Verify client exists and is active
-    const client = await Client.findOne({ email });
-    if (!client) {
+    // License verification
+    // Validate the license
+    const validationResult = await validateLicense(
+      licenseKey,
+      machineCode,
+      installedVersion || undefined
+    );
+
+    if (!validationResult.valid) {
       return NextResponse.json(
-        { status: false, error: "Client not found" },
-        { status: 404 }
+        {
+          status: false,
+          error: validationResult.message || "License validation failed",
+        },
+        { status: 400 }
       );
     }
 
-    if (client.status !== "active") {
-      return NextResponse.json(
-        { status: false, error: `Client status is ${client.status}` },
-        { status: 403 }
-      );
+    // If validation returns an asset URL, use it for download
+    if (validationResult.asset && validationResult.asset !== "NOT FOUND") {
+      try {
+        // Fetch the asset from the URL provided by license validation
+        const assetResponse = await fetch(validationResult.asset, {
+          headers: {
+            Accept: "application/octet-stream",
+            "User-Agent": "License-Admin-App",
+            ...(GITHUB_PAT ? { Authorization: `Bearer ${GITHUB_PAT}` } : {}),
+          },
+          redirect: "follow",
+        });
+
+        if (!assetResponse.ok) {
+          // Fall through to GitHub API method if browser_download_url doesn't work
+          console.warn("Failed to download from browser_download_url, falling back to GitHub API");
+        } else {
+          // Get the filename
+          let filename = "asset";
+          const contentDisposition = assetResponse.headers.get("content-disposition");
+          if (contentDisposition) {
+            const filenameMatch = contentDisposition.match(
+              /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/
+            );
+            if (filenameMatch && filenameMatch[1]) {
+              filename = filenameMatch[1].replace(/['"]/g, "");
+            }
+          }
+
+          // Extract filename from URL if not in headers
+          if (filename === "asset" && validationResult.asset) {
+            const urlParts = validationResult.asset.split("/");
+            const lastPart = urlParts[urlParts.length - 1];
+            if (lastPart && lastPart.includes(".")) {
+              filename = lastPart.split("?")[0]; // Remove query params
+            }
+          }
+
+          const contentType =
+            assetResponse.headers.get("content-type") || "application/octet-stream";
+
+          // Stream the file back to the client
+          const fileBuffer = await assetResponse.arrayBuffer();
+
+          return new NextResponse(fileBuffer, {
+            status: 200,
+            headers: {
+              "Content-Type": contentType,
+              "Content-Disposition": `attachment; filename="${filename}"`,
+              "Content-Length": fileBuffer.byteLength.toString(),
+            },
+          });
+        }
+      } catch (error) {
+        console.warn("Error downloading from asset URL, falling back to GitHub API:", error);
+        // Fall through to GitHub API method
+      }
     }
 
     // Fetch releases from GitHub
@@ -76,21 +141,22 @@ export async function GET(req: Request) {
 
     // Find the target release
     let targetRelease: GithubRelease | undefined;
+    const versionToUse = installedVersion || searchParams.get("version");
 
-    if (version) {
+    if (versionToUse) {
       // Find specific version
       targetRelease = releases.find((release) => {
         const releaseVersion = release.tag_name.replace(/^v/, "");
         return (
-          releaseVersion === version ||
-          release.tag_name === version ||
-          release.tag_name === `v${version}`
+          releaseVersion === versionToUse ||
+          release.tag_name === versionToUse ||
+          release.tag_name === `v${versionToUse}`
         );
       });
 
       if (!targetRelease) {
         return NextResponse.json(
-          { status: false, error: `Version ${version} not found` },
+          { status: false, error: `Version ${versionToUse} not found` },
           { status: 404 }
         );
       }

@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import License from "@/app/models/license";
+import Client from "@/app/models/client";
 import ValidationHistory from "@/app/models/validationHistory";
 import { connectToDatabase } from "./db";
 import { GITHUB_API_URL, GITHUB_PAT } from "@/app/configs/github.config";
@@ -116,6 +117,45 @@ export async function validateLicense(
         message: validateLicense.reason || "Invalid license key",
       };
     }
+
+    // Verify client exists and is active
+    const client = await Client.findOne({ email: license.email });
+    if (!client) {
+      validationResult = {
+        valid: false,
+        message: "No client is registered with this email",
+      };
+      // Log failed validation
+      await ValidationHistory.create({
+        licenseKey,
+        email: license.email,
+        machineCode,
+        valid: false,
+        message: "No client is registered with this email",
+        installedVersion,
+        licenseId: license._id.toString(),
+      });
+      return validationResult;
+    }
+
+    if (client.status !== "active") {
+      validationResult = {
+        valid: false,
+        message: `Client status is ${client.status}`,
+      };
+      // Log failed validation
+      await ValidationHistory.create({
+        licenseKey,
+        email: license.email,
+        machineCode,
+        valid: false,
+        message: `Client status is ${client.status}`,
+        installedVersion,
+        licenseId: license._id.toString(),
+      });
+      return validationResult;
+    }
+
     // Check if the license is active
     if (license.status !== "active") {
       validationResult = {
