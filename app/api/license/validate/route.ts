@@ -11,6 +11,7 @@ export async function POST(req: Request) {
 
     // Validate request body
     const validationResult = licenseValidateSchema.safeParse(body);
+    console.log("validationResult", validationResult);
     if (!validationResult.success) {
       return NextResponse.json(
         {
@@ -29,7 +30,7 @@ export async function POST(req: Request) {
       machineCode,
       installedVersion
     );
-
+    console.log("validationResult2", validationResult2);
     if (!validationResult2.valid) {
       return NextResponse.json(
         {
