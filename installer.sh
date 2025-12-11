@@ -19,8 +19,8 @@ ROLLBACK_LOG_FILE="$LOG_DIR/rollback.log"
 
 API_URL="https://hiretrack-super-j6ca.vercel.app/api/license/register"
 API_URL_UPDATE_LIC="https://hiretrack-super-j6ca.vercel.app/api/license/update"
-VALIDATE_API="https://hiretrack-super-j6ca.vercel.app/api/license/validate"
 LATEST_VERSION_API="https://hiretrack-super-j6ca.vercel.app/api/version/list"
+ASSET_DOWNLOAD_API="https://hiretrack-super-j6ca.vercel.app/api/asset/download"
 
 MONGODB_VERSION="${MONGODB_VERSION:-7.0}"
 # NODE_VERSION_DEFAULT=20
@@ -63,24 +63,70 @@ check_dep() {
     echo "✅ $CMD is available."
 }
 
+# get_machine_code() {
+#     local OS_TYPE
+#     OS_TYPE=$(uname | tr '[:upper:]' '[:lower:]')
+#     if [[ "$OS_TYPE" == "linux" ]]; then
+#         if [ -f /etc/machine-id ]; then
+#             cat /etc/machine-id
+#         else
+#             hostname | sha256sum | awk '{print $1}'
+#         fi
+#     elif [[ "$OS_TYPE" == "darwin" ]]; then
+#         # hostname | shasum -a 256 | awk '{print $1}'
+#         system_profiler SPHardwareDataType | awk '/Hardware UUID/ { print $3; }'
+#     else
+#         echo "❌ Unsupported OS: $OS_TYPE"
+#         exit 1
+#     fi
+# }
+
 get_machine_code() {
     local OS_TYPE
     OS_TYPE=$(uname | tr '[:upper:]' '[:lower:]')
+    local MAC_ADDR=""
+    local PUBLIC_IP=""
+
+    echo "🔍 Generating new machine code using MAC and Public IP..." >&2
+
+    # 1. Get MAC Address (First non-loopback, non-virtual interface)
     if [[ "$OS_TYPE" == "linux" ]]; then
-        if [ -f /etc/machine-id ]; then
-            cat /etc/machine-id
-        else
-            hostname | sha256sum | awk '{print $1}'
+        # On Linux, try to get the MAC of the default route interface
+        INTERFACE=$(ip route show default | awk '/default/ {print $5}' | head -n 1)
+        if [ -n "$INTERFACE" ]; then
+            MAC_ADDR=$(cat /sys/class/net/$INTERFACE/address 2>/dev/null || ip link show "$INTERFACE" | awk '/ether/ {print $2}')
         fi
     elif [[ "$OS_TYPE" == "darwin" ]]; then
-        # hostname | shasum -a 256 | awk '{print $1}'
-        system_profiler SPHardwareDataType | awk '/Hardware UUID/ { print $3; }'
+        # On macOS, typically use the Wi-Fi or Ethernet MAC
+        MAC_ADDR=$(networksetup -listallhardwareports | awk '/Hardware Port: (Wi-Fi|Ethernet)/{getline; getline; print $3; exit}' 2>/dev/null || ifconfig | awk '/ether / {print $2; exit}')
     else
-        echo "❌ Unsupported OS: $OS_TYPE"
+        echo "❌ Unsupported OS: $OS_TYPE" >&2
         exit 1
     fi
-}
+    MAC_ADDR=$(echo "$MAC_ADDR" | tr -d '[:space:]')
+    echo "   • MAC: ${MAC_ADDR:-N/A}" >&2
 
+    # 2. Get Public IP Address
+    PUBLIC_IP=$(curl -s ifconfig.me 2>/dev/null || curl -s icanhazip.com 2>/dev/null || echo "0.0.0.0")
+    echo "   • Public IP: $PUBLIC_IP" >&2
+
+    # 3. Combine and Hash (Canonical Code)
+    COMBINED_STRING="${MAC_ADDR}_${PUBLIC_IP}"
+    
+    local HASH_RESULT
+
+    if command -v shasum >/dev/null 2>&1; then
+        HASH_RESULT=$(echo "$COMBINED_STRING" | shasum -a 256 | awk '{print $1}')
+    elif command -v sha256sum >/dev/null 2>&1; then
+        HASH_RESULT=$(echo "$COMBINED_STRING" | sha256sum | awk '{print $1}')
+    else
+        echo "❌ Hash utility (shasum or sha256sum) not found. Cannot generate final machine code." >&2
+        exit 1
+    fi
+
+    # Only output the hash result to stdout (for variable capture)
+    echo "$HASH_RESULT"
+}
 prompt_for_email() {
     read -p "Enter your email: " EMAIL
     if [ -z "$EMAIL" ]; then
@@ -520,7 +566,7 @@ register_license() {
     local EMAIL="$1"
     [ -z "$EMAIL" ] && EMAIL=$(prompt_for_email)
     local MACHINE_CODE=$(get_machine_code)
-
+    echo "MACHINE_CODE: $MACHINE_CODE"
     local EXISTING_DB_CHOICE
     EXISTING_DB_CHOICE=$(jq -r '.dbChoice // empty' "$CONFIG_PATH")
     local SKIP_DB_SETUP=""
@@ -564,14 +610,14 @@ register_license() {
         write_env_mongo_url "$APP_DIR" "$DB_URL"
         write_config "dbUrl" "$DB_URL"
     fi
-
+    echo "API_URL: $API_URL with email: $EMAIL and machineCode: $MACHINE_CODE"
     local RESPONSE
     RESPONSE=$(curl -s -X POST "$API_URL" -H "Content-Type: application/json" -d "{\"email\":\"$EMAIL\",\"machineCode\":\"$MACHINE_CODE\"}")
     if [ -z "$RESPONSE" ] || ! echo "$RESPONSE" | jq . >/dev/null 2>&1; then
         echo "❌ License registration failed: Invalid response."
         exit 1
     fi
-
+    echo "RESPONSE: $RESPONSE"
     local LICENSE_KEY EMAIL_RES
     LICENSE_KEY=$(echo "$RESPONSE" | jq -r '.license.licenseKey')
     EMAIL_RES=$(echo "$RESPONSE" | jq -r '.license.email')
@@ -630,29 +676,82 @@ update_license() {
 validate_license_and_get_asset() {
     local VERSION="${1:-}"
     if [ ! -f "$LICENSE_PATH" ]; then
-        echo "❌ License not found. Please register first."
-        exit 1
+        echo "❌ License not found. Please register first." >&2
+        return 1
     fi
 
     local LICENSE_KEY=$(jq -r '.licenseKey' "$LICENSE_PATH")
     local MACHINE_CODE=$(get_machine_code)
     local INSTALLED_VERSION=$(jq -r '.installedVersion // "none"' "$CONFIG_PATH")
     local VERSION_TO_SEND="${VERSION:-$INSTALLED_VERSION}"
-    local RESPONSE
-    RESPONSE=$(curl -s -X POST "$VALIDATE_API" -H "Content-Type: application/json" -d "{\"licenseKey\":\"$LICENSE_KEY\",\"machineCode\":\"$MACHINE_CODE\",\"installedVersion\":\"$VERSION_TO_SEND\"}")
-    if [ -z "$RESPONSE" ] || ! echo "$RESPONSE" | jq . >/dev/null 2>&1; then
-        echo "❌ License validation failed: Invalid response."
-        exit 1
+    
+    # Build query parameters
+    local QUERY_PARAMS="licenseKey=$(printf '%s' "$LICENSE_KEY" | jq -sRr @uri)&machineCode=$(printf '%s' "$MACHINE_CODE" | jq -sRr @uri)"
+    if [ -n "$VERSION_TO_SEND" ] && [ "$VERSION_TO_SEND" != "none" ]; then
+        QUERY_PARAMS="${QUERY_PARAMS}&installedVersion=$(printf '%s' "$VERSION_TO_SEND" | jq -sRr @uri)"
     fi
-
-    local VALID ASSET_URL
-    VALID=$(echo "$RESPONSE" | jq -r '.valid')
-    ASSET_URL=$(echo "$RESPONSE" | jq -r '.asset')
-    if [ "$VALID" != "true" ]; then
-        echo "❌ License invalid or expired."
-        exit 1
+    
+    local TMP_FILE="$HOME/.hiretrack/tmp_asset.tar.gz"
+    local HTTP_CODE
+    
+    # Remove any existing partial download
+    rm -f "$TMP_FILE"
+    
+    # Download asset with license validation
+    # -w writes HTTP code to stdout, -o saves response body to file
+    # --progress-bar shows download progress on stderr
+    # Capture HTTP code from stdout (last line), progress shows on stderr
+    echo "📥 Downloading asset with license validation..." >&2
+    HTTP_CODE=$(curl -w "\n%{http_code}" -o "$TMP_FILE" \
+        --progress-bar \
+        "$ASSET_DOWNLOAD_API?$QUERY_PARAMS" 2>&1 | grep -E '^[0-9]{3}$' | tail -n1 || echo "000")
+    
+    # Check for curl errors (non-HTTP errors like network failures)
+    if [ -z "$HTTP_CODE" ] || ! echo "$HTTP_CODE" | grep -qE '^[0-9]{3}$'; then
+        echo "❌ Network error: Failed to connect to server. Please check your internet connection." >&2
+        rm -f "$TMP_FILE"
+        return 1
     fi
-    echo "$ASSET_URL"
+    
+    # Check if download was successful (HTTP 200)
+    if [ "$HTTP_CODE" != "200" ]; then
+        # Try to read error message from response if it's JSON
+        if [ -f "$TMP_FILE" ] && [ -s "$TMP_FILE" ]; then
+            # Check if response starts with '{' (JSON error message)
+            local FIRST_CHAR
+            FIRST_CHAR=$(head -c 1 "$TMP_FILE" 2>/dev/null || echo "")
+            if [ "$FIRST_CHAR" = "{" ]; then
+                local ERROR_MSG
+                ERROR_MSG=$(jq -r '.error // .message // "Unknown error"' "$TMP_FILE" 2>/dev/null || echo "License validation failed")
+                echo "❌ License validation failed: $ERROR_MSG" >&2
+            else
+                echo "❌ License validation failed: HTTP $HTTP_CODE" >&2
+            fi
+        else
+            echo "❌ License validation failed: HTTP $HTTP_CODE (No response body)" >&2
+        fi
+        rm -f "$TMP_FILE"
+        return 1
+    fi
+    
+    # Verify file was downloaded and has content
+    if [ ! -f "$TMP_FILE" ] || [ ! -s "$TMP_FILE" ]; then
+        echo "❌ Downloaded file is empty or missing." >&2
+        rm -f "$TMP_FILE"
+        return 1
+    fi
+    
+    # Check file size (should be > 0 and reasonable)
+    local FILE_SIZE
+    FILE_SIZE=$(stat -f%z "$TMP_FILE" 2>/dev/null || stat -c%s "$TMP_FILE" 2>/dev/null || echo "0")
+    if [ "$FILE_SIZE" -lt 1000 ]; then
+        echo "❌ Downloaded file is too small ($FILE_SIZE bytes). File may be corrupted or incomplete." >&2
+        rm -f "$TMP_FILE"
+        return 1
+    fi
+    
+    # Return the downloaded file path
+    echo "$TMP_FILE"
 }
 
 # ------------------------------------------------
@@ -902,34 +1001,26 @@ check_update_and_install() {
     fi
 
     log "🚀 Update available: upgrading to $LATEST_VERSION"
-    local ASSET_URL
-    ASSET_URL=$(validate_license_and_get_asset "$LATEST_VERSION") || { log "❌ Failed to validate license."; return 1; }
-
-    local TMP_FILE="$HOME/.hiretrack/tmp_asset.tar.gz"
-    log "📥 Downloading $ASSET_URL → $TMP_FILE"
+    local TMP_FILE
+    TMP_FILE=$(validate_license_and_get_asset "$LATEST_VERSION") || { log "❌ Failed to validate license and download asset."; return 1; }
     
-    # Remove any existing partial download
-    rm -f "$TMP_FILE"
-    
-    # Download with progress and better error handling
-    if ! curl -L --fail --progress-bar --show-error "$ASSET_URL" -o "$TMP_FILE"; then
-        log "❌ Download failed. Please check your network connection and try again."
-        rm -f "$TMP_FILE"
+    if [ ! -f "$TMP_FILE" ]; then
+        log "❌ Downloaded file not found at $TMP_FILE"
         return 1
     fi
     
-    # Verify file was downloaded and has content
-    if [ ! -f "$TMP_FILE" ] || [ ! -s "$TMP_FILE" ]; then
-        log "❌ Downloaded file is empty or missing."
-        rm -f "$TMP_FILE"
-        return 1
-    fi
+    log "✅ Asset downloaded successfully: $TMP_FILE"
     
     sleep 1
-    local FILENAME VERSION_NAME
-    FILENAME=$(basename "$ASSET_URL")
-    VERSION_NAME="${FILENAME%.tar.gz}"
-    VERSION_NAME=${VERSION_NAME#hiretrack-}
+    # Derive PM2 app name from target version instead of temp file name
+    # ensure we keep a leading "v" for clarity (hiretrack-v2.x.x)
+    local FILENAME VERSION_NAME APP_NAME_WITH_VERSION
+    FILENAME=$(basename "$TMP_FILE")
+    VERSION_NAME="$LATEST_VERSION"
+    if [[ "$VERSION_NAME" != v* ]]; then
+        VERSION_NAME="v$VERSION_NAME"
+    fi
+    APP_NAME_WITH_VERSION="hiretrack-$VERSION_NAME"
 
     # # Backup existing
     # local BACKUP_FILE="$BACKUP_DIR/backup-$INSTALLED_VERSION.tar"
@@ -1079,9 +1170,9 @@ check_update_and_install() {
     
 
     # Start new hiretrack process   
-    pm2 start "npm run start" --name "hiretrack-$VERSION_NAME" --cwd "$APP_INSTALL_DIR" || {
+    pm2 start "npm run start" --name "$APP_NAME_WITH_VERSION" --cwd "$APP_INSTALL_DIR" || {
         log "❌ Failed to start. Rolling back..."
-        pm2 delete "hiretrack-$VERSION_NAME" || true
+        pm2 delete "$APP_NAME_WITH_VERSION" || true
         rollback "$INSTALLED_VERSION"
         return 1
     }
@@ -1124,69 +1215,59 @@ run_migrations() {
 
     echo "📦 Fetching migrations from $CURRENT_VERSION → $TARGET_VERSION ..." | tee -a "$LOG_DIR/migration.log"
 
-    # Fetch releases from API
-    local RESPONSE VERSIONS
-    RESPONSE="$(curl -s "${LATEST_VERSION_API:-}" 2>/dev/null || true)"
+    mkdir -p "$TMP_INSTALL_DIR" "$APP_INSTALL_DIR" "$LOG_DIR" >/dev/null 2>&1 || true
 
-    if [ -z "$RESPONSE" ] || ! echo "$RESPONSE" | jq . >/dev/null 2>&1; then
+    # Call migration download API with currentVersion and requiredVersion (target)
+    local MIG_RESPONSE
+    MIG_RESPONSE="$(curl -s "$ASSET_MIGRATION_API?currentVersion=$CURRENT_VERSION&requiredVersion=$TARGET_VERSION" 2>/dev/null || true)"
+
+    if [ -z "$MIG_RESPONSE" ] || ! echo "$MIG_RESPONSE" | jq . >/dev/null 2>&1; then
         echo "⚠️ Warning: Invalid or empty migration response — skipping migrations." | tee -a "$LOG_DIR/migration.log"
         return 0
     fi
 
-    # Extract versions from API
-    VERSIONS="$(echo "$RESPONSE" | jq -r '.versions[].version' 2>/dev/null || true)"
-    if [ -z "$VERSIONS" ] || [ "$VERSIONS" = "null" ]; then
+    local MIG_COUNT
+    MIG_COUNT=$(echo "$MIG_RESPONSE" | jq -r '.migrations | length' 2>/dev/null || echo "0")
+
+    if [ "$MIG_COUNT" = "0" ]; then
         echo "✅ No migrations required." | tee -a "$LOG_DIR/migration.log"
         return 0
     fi
 
-    # Sort versions semantically and filter between CURRENT and TARGET if provided
-    local FILTERED_VERSIONS
-    FILTERED_VERSIONS="$(echo "$VERSIONS" | sort -V | awk -v CUR="$CURRENT_VERSION" -v TGT="$TARGET_VERSION" '
-        (CUR == "none" || $0 > CUR) && (TGT == "none" || $0 <= TGT) { print $0 }'
-    )"
+    for i in $(seq 0 $((MIG_COUNT-1))); do
+        local VER FILE_NAME CONTENT_B64 CONTENT_TYPE TMP_MIG
+        VER=$(echo "$MIG_RESPONSE" | jq -r ".migrations[$i].version")
+        FILE_NAME=$(echo "$MIG_RESPONSE" | jq -r ".migrations[$i].fileName")
+        CONTENT_B64=$(echo "$MIG_RESPONSE" | jq -r ".migrations[$i].contentBase64")
+        CONTENT_TYPE=$(echo "$MIG_RESPONSE" | jq -r ".migrations[$i].contentType")
 
-    mkdir -p "$TMP_INSTALL_DIR" "$APP_INSTALL_DIR" "$LOG_DIR" >/dev/null 2>&1 || true
+        if [ -z "$CONTENT_B64" ] || [ "$CONTENT_B64" = "null" ]; then
+            echo "ℹ️ Missing content for migration $VER — skipping." | tee -a "$LOG_DIR/migration.log"
+            continue
+        fi
 
-    for ver in $FILTERED_VERSIONS; do
-        local MIG_URL MIG_FILE MIG_EXT
-        MIG_URL="$(echo "$RESPONSE" | jq -r ".versions[] | select(.version == \"$ver\") .migrationScriptUrl // empty" 2>/dev/null || true)"
-        MIG_EXT="$(echo "$MIG_URL" | grep -oE '\.[a-zA-Z0-9]+$' || echo "")"
-        MIG_FILE="$TMP_INSTALL_DIR/migration_${ver}${MIG_EXT:-.cjs}"
+        TMP_MIG="$TMP_INSTALL_DIR/${FILE_NAME:-migration_$VER.cjs}"
+        echo "$CONTENT_B64" | base64 -d > "$TMP_MIG" 2>>"$LOG_DIR/migration.log" || {
+            echo "⚠️ Failed to decode migration for $VER — skipping." | tee -a "$LOG_DIR/migration.log"
+            rm -f "$TMP_MIG" >/dev/null 2>&1 || true
+            continue
+        }
 
         echo "──────────────────────────────────────────────" | tee -a "$LOG_DIR/migration.log"
-        echo "🆕 Preparing migration for version: $ver" | tee -a "$LOG_DIR/migration.log"
-        echo "MIG_URL  :: $MIG_URL" | tee -a "$LOG_DIR/migration.log"
-        echo "MIG_FILE :: $MIG_FILE" | tee -a "$LOG_DIR/migration.log"
+        echo "🆕 Preparing migration for version: $VER" | tee -a "$LOG_DIR/migration.log"
+        echo "FILE     :: $TMP_MIG" | tee -a "$LOG_DIR/migration.log"
+        echo "TYPE     :: ${CONTENT_TYPE:-application/octet-stream}" | tee -a "$LOG_DIR/migration.log"
 
-        if [ -n "$MIG_URL" ] && [ "$MIG_URL" != "null" ]; then
-            echo "📥 Downloading migration for version $ver..." | tee -a "$LOG_DIR/migration.log"
-            curl -s -L -o "$MIG_FILE" "$MIG_URL" 2>> "$LOG_DIR/migration.log"
+        # Run migration
+        (
+            cd "$APP_INSTALL_DIR" 2>/dev/null || true
+            [ -f ".env" ] && export $(grep -v '^#' .env | xargs) >/dev/null 2>&1
+            echo "📂 Using NODE_PATH=$APP_INSTALL_DIR/node_modules" | tee -a "$LOG_DIR/migration.log"
+            NODE_PATH="$APP_INSTALL_DIR/node_modules" node "$TMP_MIG" >> "$LOG_DIR/migration.log" 2>&1 || true
+        )
 
-            if [ ! -s "$MIG_FILE" ]; then
-                echo "⚠️ Failed to download or file empty for $ver — check migration.log" | tee -a "$LOG_DIR/migration.log"
-                rm -f "$MIG_FILE" >/dev/null 2>&1 || true
-                continue
-            fi
-
-            echo "▶️ Running migration for version $ver..." | tee -a "$LOG_DIR/migration.log"
-            (
-                cd "$APP_INSTALL_DIR" 2>/dev/null || true
-
-                # Load .env if present
-                [ -f ".env" ] && export $(grep -v '^#' .env | xargs) >/dev/null 2>&1
-
-                echo "📂 Using NODE_PATH=$APP_INSTALL_DIR/node_modules" | tee -a "$LOG_DIR/migration.log"
-
-                # Run migration safely with local node_modules, assuming mongodb package is installed
-                NODE_PATH="$APP_INSTALL_DIR/node_modules" node "$MIG_FILE" >> "$LOG_DIR/migration.log" 2>&1 || true
-            )
-
-            rm -f "$MIG_FILE" >/dev/null 2>&1 || true
-            echo "✅ Migration for $ver completed (see migration.log for details)." | tee -a "$LOG_DIR/migration.log"
-        else
-            echo "ℹ️ No migration URL found for version $ver — skipping." | tee -a "$LOG_DIR/migration.log"
-        fi
+        rm -f "$TMP_MIG" >/dev/null 2>&1 || true
+        echo "✅ Migration for $VER completed (see migration.log for details)." | tee -a "$LOG_DIR/migration.log"
     done
 
     echo "✅ All available migrations processed (failures skipped safely)." | tee -a "$LOG_DIR/migration.log"

@@ -1,0 +1,183 @@
+import { NextResponse } from "next/server";
+import { GITHUB_API_URL, GITHUB_PAT } from "@/app/configs/github.config";
+
+type GithubAsset = {
+  name: string;
+  browser_download_url?: string;
+};
+
+type GithubRelease = {
+  tag_name: string;
+  assets?: GithubAsset[];
+  published_at: string;
+};
+
+function findMigrationAsset(assets: GithubAsset[] = []) {
+  return assets.find((a) =>
+    a.name.toLowerCase().includes("migrationscripturl")
+  );
+}
+
+function compareVersions(a: string, b: string) {
+  const pa = a.split(".").map(Number);
+  const pb = b.split(".").map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const diff = (pa[i] || 0) - (pb[i] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+function isVersionInRange(
+  releaseTag: string,
+  currentVersion?: string | null,
+  requiredVersion?: string | null
+) {
+  const version = releaseTag.replace(/^v/, "");
+  const current = currentVersion?.replace(/^v/, "");
+  const required = requiredVersion?.replace(/^v/, "");
+
+  if (current && compareVersions(version, current) < 0) return false;
+  if (required && compareVersions(version, required) > 0) return false;
+  return true;
+}
+
+function normalizeVersionMatch(release: GithubRelease, version?: string | null) {
+  if (!version) return true;
+  const clean = version.replace(/^v/, "");
+  const tag = release.tag_name.replace(/^v/, "");
+  return tag === clean || release.tag_name === version;
+}
+
+export async function GET(req: Request) {
+  try {
+    const { searchParams } = new URL(req.url);
+    const requestedVersion = searchParams.get("version");
+    const currentVersion = searchParams.get("currentVersion");
+    const requiredVersion =
+      searchParams.get("requiredVersion") || searchParams.get("upgradeVersion");
+
+    const headers: Record<string, string> = {
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "License-Admin-App",
+    };
+    if (GITHUB_PAT) {
+      headers.Authorization = `Bearer ${GITHUB_PAT}`;
+    }
+
+    const releasesRes = await fetch(GITHUB_API_URL, { headers });
+    if (!releasesRes.ok) {
+      return NextResponse.json(
+        { status: false, error: "Failed to fetch releases from GitHub" },
+        { status: 500 }
+      );
+    }
+
+    const releases = (await releasesRes.json()) as GithubRelease[];
+    if (!Array.isArray(releases) || releases.length === 0) {
+      return NextResponse.json(
+        { status: false, error: "No releases found" },
+        { status: 404 }
+      );
+    }
+
+    // Filter releases within range when current/required provided
+    let targetReleases: GithubRelease[] = releases;
+
+    if (currentVersion || requiredVersion) {
+      targetReleases = releases.filter((r) =>
+        isVersionInRange(r.tag_name, currentVersion, requiredVersion)
+      );
+    } else if (requestedVersion) {
+      const match = releases.find((r) => normalizeVersionMatch(r, requestedVersion));
+      targetReleases = match ? [match] : [];
+    } else {
+      // default: latest only
+      targetReleases = releases.slice(0, 1);
+    }
+    console.log("targetReleases", targetReleases);
+    if (!targetReleases.length) {
+      return NextResponse.json(
+        {
+          status: false,
+          error: `Version range not found (${
+            requestedVersion || `${currentVersion || "N/A"} -> ${requiredVersion || "latest"}`
+          })`,
+        },
+        { status: 404 }
+      );
+    }
+
+    // Collect migration scripts across target releases (sorted ascending by version)
+    const normalized = targetReleases
+      .map((r) => ({
+        release: r,
+        version: r.tag_name.replace(/^v/, ""),
+      }))
+      .sort((a, b) => compareVersions(a.version, b.version));
+
+    const migrations: Array<{
+      version: string;
+      fileName: string;
+      contentBase64: string;
+      size: number;
+      contentType: string;
+    }> = [];
+    console.log("normalized", normalized);  
+    for (const entry of normalized) {
+      const migrationAsset = findMigrationAsset(entry.release.assets || []);
+      if (!migrationAsset || !migrationAsset.browser_download_url) {
+        continue;
+      }
+
+      const assetRes = await fetch(migrationAsset.browser_download_url, {
+        headers: {
+          Accept: "application/octet-stream",
+          "User-Agent": "License-Admin-App",
+          ...(GITHUB_PAT ? { Authorization: `Bearer ${GITHUB_PAT}` } : {}),
+        },
+      });
+
+      if (!assetRes.ok) {
+        return NextResponse.json(
+          {
+            status: false,
+            error: `Failed to download migration script for version ${entry.version}`,
+          },
+          { status: assetRes.status }
+        );
+      }
+
+      const buffer = Buffer.from(await assetRes.arrayBuffer());
+      const fileName = migrationAsset.name || "migrationScriptUrl.cjs";
+      const contentType =
+        assetRes.headers.get("content-type") || "application/octet-stream";
+
+      migrations.push({
+        version: entry.version,
+        fileName,
+        contentBase64: buffer.toString("base64"),
+        size: buffer.length,
+        contentType,
+      });
+    }
+
+    return NextResponse.json({
+      status: true,
+      currentVersion: currentVersion || null,
+      requiredVersion: requiredVersion || null,
+      migrations,
+      normalized
+    });
+  } catch (error: unknown) {
+    console.error("Error downloading migration script:", error);
+    return NextResponse.json(
+      {
+        status: false,
+        error: "Internal server error",
+        message: error instanceof Error ? error.message : "Unknown error",
+      },
+      { status: 500 }
+    );
+  }
+}
