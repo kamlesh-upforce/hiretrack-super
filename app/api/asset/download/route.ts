@@ -201,7 +201,7 @@ export async function GET(req: Request) {
 
     // Construct the GitHub API asset download URL
     const assetDownloadUrl = `https://api.github.com/repos/${GITHUB_REPO}/releases/assets/${asset.id}`;
-
+    console.log("assetDownloadUrl", assetDownloadUrl);
     // Fetch the asset from GitHub API
     const downloadHeaders: Record<string, string> = {
       Accept: "application/octet-stream",
@@ -215,6 +215,7 @@ export async function GET(req: Request) {
       headers: downloadHeaders,
       redirect: "follow", // Follow redirects
     });
+    console.log("assetResponse", assetResponse);
     if (!assetResponse.ok) {
       return NextResponse.json(
         { status: false, error: "Failed to fetch asset from GitHub" },
@@ -252,6 +253,7 @@ export async function GET(req: Request) {
     });
   } catch (error: unknown) {
     console.error("Error downloading asset:", error);
+    console.log("error", error);
     return NextResponse.json(
       {
         status: false,
