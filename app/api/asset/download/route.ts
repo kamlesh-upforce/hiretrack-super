@@ -46,7 +46,7 @@ export async function GET(req: Request) {
       machineCode,
       installedVersion || undefined
     );
-
+    console.log("validationResult", validationResult);
     if (!validationResult.valid) {
       return NextResponse.json(
         {
@@ -97,10 +97,9 @@ export async function GET(req: Request) {
 
           const contentType =
             assetResponse.headers.get("content-type") || "application/octet-stream";
-
+          console.log("contentType", contentType , "assetResponse", assetResponse);
           // Stream the file back to the client
           const fileBuffer = await assetResponse.arrayBuffer();
-
           return new NextResponse(fileBuffer, {
             status: 200,
             headers: {
