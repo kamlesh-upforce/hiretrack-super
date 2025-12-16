@@ -28,17 +28,23 @@ export async function POST(req: Request) {
 
     // Check if a license with the same email and machineCode already exists
     // const existingLicense = await License.findOne({ email, machineCode });
-    const existingLicense = await License.findOne({
-      $or: [{ email }, { machineCode }],
+    const existingLicense = await License.find({
+      email: email,
+      machineCode: machineCode,
+      status: { $ne: "revoked" },
     });
-    if (existingLicense && existingLicense.status !== "revoked") {
+
+    console.log("existingLicense", existingLicense);
+    if (existingLicense && existingLicense.length > 0) {
       return NextResponse.json(
         {
+          existingLicense: existingLicense,
           error: "A license for this email and machine code already exists.",
         },
         { status: 400 }
       );
     }
+
 
     // Check if a client exists with this email in the Client collection
     const existingClient = await Client.findOne({ email });
