@@ -17,11 +17,11 @@ SNAPSHOT_LOG_FILE="$LOG_DIR/snapshot.log"
 MANUAL_LOG_FILE="$LOG_DIR/manual_update.log"
 ROLLBACK_LOG_FILE="$LOG_DIR/rollback.log"
 
-API_URL="https://hiretrack-super-j6ca.vercel.app/api/license/register"
-API_URL_UPDATE_LIC="https://hiretrack-super-j6ca.vercel.app/api/license/update"
-LATEST_VERSION_API="https://hiretrack-super-j6ca.vercel.app/api/version/list"
-ASSET_DOWNLOAD_API="https://hiretrack-super-j6ca.vercel.app/api/asset/download"
-ASSET_MIGRATION_API="https://hiretrack-super-j6ca.vercel.app/api/migration/download"
+API_URL="https://admin.hiretrack.in/api/license/register"
+API_URL_UPDATE_LIC="https://admin.hiretrack.in/api/license/update"
+LATEST_VERSION_API="https://admin.hiretrack.in/api/version/list"
+ASSET_DOWNLOAD_API="https://admin.hiretrack.in/api/asset/download"
+ASSET_MIGRATION_API="https://admin.hiretrack.in/api/migration/download"
 MONGODB_VERSION="${MONGODB_VERSION:-7.0}"
 # NODE_VERSION_DEFAULT=20
 
@@ -2416,9 +2416,8 @@ restart_pm2_service() {
 setup_cron() {
     local OS_TYPE=$(uname | tr '[:upper:]' '[:lower:]')
     local CRON_NAME="hiretrack-autoupdate"
-    local CRON_PATH="/root/.hiretrack/installer.sh"
     local SNAPSHOT_CRON_NAME="hiretrack-snapshot"
-    local CRON_ENTRY="0 2 * * * PATH=/usr/local/bin:/usr/bin:/bin $CRON_PATH --update >> $CRON_LOG_FILE 2>&1"
+    local CRON_ENTRY="0 2 * * * PATH=/usr/local/bin:/usr/bin:/bin $SCRIPT_PATH --update >> $CRON_LOG_FILE 2>&1"
     local SNAPSHOT_CRON_ENTRY="0 2 * * * PATH=/usr/local/bin:/usr/bin:/bin node $SNAPSHOT_SCRIPT >> $SNAPSHOT_LOG_FILE 2>&1"
 
     if [[ "$OS_TYPE" == "linux" || "$OS_TYPE" == "darwin" ]]; then
