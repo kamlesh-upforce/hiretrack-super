@@ -1,7 +1,7 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { getClientIP } from "@/lib/ratelimit";
 
-export async function GET(request: NextRequest) {
-  const ip = await getClientIP(request);
+export async function GET() {
+  const ip = await getClientIP();
   return NextResponse.json({ ip });
 }

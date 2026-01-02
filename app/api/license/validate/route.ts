@@ -14,7 +14,7 @@ const RATE_LIMIT_CONFIG = {
 export async function POST(req: NextRequest) {
   try {
     // Get client IP address
-    const clientIP = await getClientIP(req);
+    const clientIP = await getClientIP();
 
     // Check rate limit
     const rateLimitResult = checkRateLimit(clientIP, RATE_LIMIT_CONFIG);

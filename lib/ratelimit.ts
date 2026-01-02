@@ -93,29 +93,10 @@ export function checkRateLimit(
  * Get client IP address from request
  * Handles various proxy headers (X-Forwarded-For, X-Real-IP, etc.)
  */
-export async function getClientIP(request: NextRequest): Promise<string> {
-  // Try to get IP from various headers (for proxies/load balancers)
-  const forwardedFor = request.headers.get("x-forwarded-for");
-  console.log("forwardedFor", forwardedFor);
-  if (forwardedFor) {
-    // X-Forwarded-For can contain multiple IPs, take the first one
-    const ips = forwardedFor.split(",").map((ip) => ip.trim());
-    return ips[0] || "unknown";
-  }
+export async function getClientIP(): Promise<string> {
 
-  const realIP = request.headers.get("x-real-ip");
-  console.log("realIP", realIP);
-  if (realIP) {
-    return realIP;
-  }
-
-  const cfConnectingIP = request.headers.get("cf-connecting-ip"); // Cloudflare
-  console.log("cfConnectingIP", cfConnectingIP);
-  if (cfConnectingIP) {
-    return cfConnectingIP;
-  }
-
-  // Fallback to unknown if we can't determine IP
-  return "unknown";
+    const data = await fetch("https://api.ipify.org?format=json");
+    const dataJson = await data.json();
+    return dataJson.ip as string || "unknown";
 }
 
