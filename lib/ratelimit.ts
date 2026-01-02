@@ -96,6 +96,7 @@ export function checkRateLimit(
 export async function getClientIP(request: NextRequest): Promise<string> {
   // Try to get IP from various headers (for proxies/load balancers)
   const forwardedFor = request.headers.get("x-forwarded-for");
+  console.log("forwardedFor", forwardedFor);
   if (forwardedFor) {
     // X-Forwarded-For can contain multiple IPs, take the first one
     const ips = forwardedFor.split(",").map((ip) => ip.trim());
@@ -103,11 +104,13 @@ export async function getClientIP(request: NextRequest): Promise<string> {
   }
 
   const realIP = request.headers.get("x-real-ip");
+  console.log("realIP", realIP);
   if (realIP) {
     return realIP;
   }
 
   const cfConnectingIP = request.headers.get("cf-connecting-ip"); // Cloudflare
+  console.log("cfConnectingIP", cfConnectingIP);
   if (cfConnectingIP) {
     return cfConnectingIP;
   }
