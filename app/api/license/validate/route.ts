@@ -2,10 +2,43 @@ import { NextResponse } from "next/server";
 import { connectToDatabase } from "@/lib/db";
 import { validateLicense } from "@/lib/license";
 import { licenseValidateSchema } from "@/lib/validators";
+import { checkRateLimit, getClientIP } from "@/lib/ratelimit";
+
+// Rate limit configuration
+const RATE_LIMIT_CONFIG = {
+  maxRequests: 5, // Maximum 5 requests
+  windowMs: 60 * 1000, // Per 60 seconds (1 minute)
+};
 
 // POST: Validate a license
 export async function POST(req: Request) {
   try {
+    // Get client IP address
+    const clientIP = await getClientIP(req);
+
+    // Check rate limit
+    const rateLimitResult = checkRateLimit(clientIP, RATE_LIMIT_CONFIG);
+
+    if (!rateLimitResult.success) {
+      return NextResponse.json(
+        {
+          error: "Rate limit exceeded",
+          message: `Too many requests. Please try again after ${rateLimitResult.retryAfter} seconds.`,
+          retryAfter: rateLimitResult.retryAfter,
+          valid: false,
+        },
+        {
+          status: 429,
+          headers: {
+            "X-RateLimit-Limit": rateLimitResult.limit.toString(),
+            "X-RateLimit-Remaining": rateLimitResult.remaining.toString(),
+            "X-RateLimit-Reset": new Date(rateLimitResult.reset).toISOString(),
+            "Retry-After": rateLimitResult.retryAfter?.toString() || "60",
+          },
+        }
+      );
+    }
+
     await connectToDatabase();
     const body = await req.json();
 
@@ -41,11 +74,20 @@ export async function POST(req: Request) {
       );
     }
 
-    return NextResponse.json({
-      valid: true,
-      asset: validationResult2.asset,
-      licenseData: validationResult2.licenseData,
-    });
+    return NextResponse.json(
+      {
+        valid: true,
+        asset: validationResult2.asset,
+        licenseData: validationResult2.licenseData,
+      },
+      {
+        headers: {
+          "X-RateLimit-Limit": rateLimitResult.limit.toString(),
+          "X-RateLimit-Remaining": rateLimitResult.remaining.toString(),
+          "X-RateLimit-Reset": new Date(rateLimitResult.reset).toISOString(),
+        },
+      }
+    );
   } catch (error: unknown) {
     console.error("Error validating license:", error);
     return NextResponse.json(
