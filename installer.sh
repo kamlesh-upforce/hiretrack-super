@@ -816,28 +816,40 @@ check_latest_version() {
 
 
 rollback() {
-    local VERSION_TO_RESTORE="${1:-}"   # default to empty string if not passed
+    # Get previous version from config.json
+    local VERSION_TO_RESTORE
+    if [ -f "$CONFIG_PATH" ]; then
+        VERSION_TO_RESTORE=$(jq -r '.previousVersion // empty' "$CONFIG_PATH")
+    fi
 
-    if [ -z "$VERSION_TO_RESTORE" ]; then
-        echo "❌ rollback() called without a version" | tee -a "$ROLLBACK_LOG_FILE"
+    if [ -z "$VERSION_TO_RESTORE" ] || [ "$VERSION_TO_RESTORE" = "null" ] || [ "$VERSION_TO_RESTORE" = "none" ]; then
+        echo "❌ No previous version found in config.json for rollback" | tee -a "$ROLLBACK_LOG_FILE"
         return 1
     fi
 
-    if [ "$VERSION_TO_RESTORE" = "none" ]; then
-        echo "⚠️ VERSION_TO_RESTORE is set to 'none', skipping rollback" | tee -a "$ROLLBACK_LOG_FILE"
-        # Still clean up any failed extraction state
-        if [ -d "$APP_INSTALL_DIR" ] && [ -z "$(find "$APP_INSTALL_DIR" -mindepth 1 -print -quit 2>/dev/null)" ]; then
-            echo "🧹 Cleaning up empty installation directory..." | tee -a "$ROLLBACK_LOG_FILE"
-            rm -rf "$APP_INSTALL_DIR" 2>&1 | tee -a "$ROLLBACK_LOG_FILE" || true
-        fi
-        return
+    echo "🔄 Rolling back to version $VERSION_TO_RESTORE..." | tee -a "$ROLLBACK_LOG_FILE"
+
+    # Download the previous version
+    echo "📥 Downloading version $VERSION_TO_RESTORE..." | tee -a "$ROLLBACK_LOG_FILE"
+    local TMP_FILE
+    TMP_FILE=$(validate_license_and_get_asset "$VERSION_TO_RESTORE") || {
+        echo "❌ Failed to download version $VERSION_TO_RESTORE" | tee -a "$ROLLBACK_LOG_FILE"
+        return 1
+    }
+
+    if [ ! -f "$TMP_FILE" ]; then
+        echo "❌ Downloaded file not found at $TMP_FILE" | tee -a "$ROLLBACK_LOG_FILE"
+        return 1
     fi
 
-    # Ensure BACKUP_DIR is defined
-    local BACKUP_DIR="${BACKUP_DIR:-$LOG_DIR/backups}"  
-    local BACKUP_FILE="$BACKUP_DIR/backup-$VERSION_TO_RESTORE.tar"
-
-    echo "🔄 Rolling back to version $VERSION_TO_RESTORE..." | tee -a "$ROLLBACK_LOG_FILE"
+    # Check file size
+    local FILE_SIZE
+    FILE_SIZE=$(stat -f%z "$TMP_FILE" 2>/dev/null || stat -c%s "$TMP_FILE" 2>/dev/null || echo "0")
+    if [ "$FILE_SIZE" -lt 1000 ]; then
+        echo "❌ Downloaded file is too small ($FILE_SIZE bytes). File may be corrupted." | tee -a "$ROLLBACK_LOG_FILE"
+        rm -f "$TMP_FILE"
+        return 1
+    fi
 
     # Remove current install directory (only if exists)
     if [ -d "$APP_INSTALL_DIR" ]; then
@@ -848,43 +860,83 @@ rollback() {
         fi
     fi
 
-    # Restore from backup if found
-    if [ -f "$BACKUP_FILE" ]; then
-        mkdir -p "$APP_INSTALL_DIR" 2>&1 | tee -a "$ROLLBACK_LOG_FILE"
-        tar -xf "$BACKUP_FILE" -C "$APP_INSTALL_DIR" 2>&1 | tee -a "$ROLLBACK_LOG_FILE"
-        cd "$APP_INSTALL_DIR" || exit
-        echo "📦 Restoring dependencies..." | tee -a "$ROLLBACK_LOG_FILE"
-        if ! clean_npm_install "$APP_INSTALL_DIR" 2>&1 | tee -a "$ROLLBACK_LOG_FILE"; then
-            echo "❌ npm install failed during rollback." | tee -a "$ROLLBACK_LOG_FILE"
-            return 1
-        fi
+    # Extract the downloaded version
+    mkdir -p "$APP_INSTALL_DIR"
+    echo "📂 Extracting archive to $APP_INSTALL_DIR..." | tee -a "$ROLLBACK_LOG_FILE"
+    
+    local EXTRACT_OUTPUT EXTRACT_STATUS
+    EXTRACT_OUTPUT=$(tar --no-xattrs -xzf "$TMP_FILE" -C "$APP_INSTALL_DIR" 2>&1)
+    EXTRACT_STATUS=$?
+    
+    # Filter out harmless macOS xattr warnings
+    if [ -n "$EXTRACT_OUTPUT" ]; then
+        echo "$EXTRACT_OUTPUT" | grep -v "LIBARCHIVE.xattr" | grep -v "^$" >&2 || true
+    fi
+    
+    # Clean up temp file after extraction
+    rm -f "$TMP_FILE" >/dev/null 2>&1 || true
 
-        echo "🚀 Restarting previous version with PM2..." | tee -a "$ROLLBACK_LOG_FILE"
-
-        # Kill only hiretrack-* processes, not all
-        echo "🧹 Cleaning up old hiretrack PM2 processes..." | tee -a "$ROLLBACK_LOG_FILE"
-        pm2 list | awk '/hiretrack-/ {print $4}' | while read -r PROC; do
-            if [ -n "$PROC" ]; then
-                echo "🛑 Stopping $PROC..." | tee -a "$ROLLBACK_LOG_FILE"
-                pm2 delete "$PROC" 2>&1 | tee -a "$ROLLBACK_LOG_FILE" || true
-            fi
-        done
-
-        # Start the restored version
-        pm2 start "npm run start" --name "hiretrack-$VERSION_TO_RESTORE" --cwd "$APP_INSTALL_DIR" 2>&1 | tee -a "$ROLLBACK_LOG_FILE" || true
-
-    else
-        echo "⚠️ Backup not found. Killing only hiretrack-* PM2 processes..." | tee -a "$ROLLBACK_LOG_FILE"
-        pm2 list | awk '/hiretrack-/ {print $4}' | while read -r PROC; do
-            if [ -n "$PROC" ]; then
-                echo "🛑 Stopping $PROC..." | tee -a "$ROLLBACK_LOG_FILE"
-                pm2 delete "$PROC" 2>&1 | tee -a "$ROLLBACK_LOG_FILE" || true
-            fi
-        done
+    if [ $EXTRACT_STATUS -ne 0 ]; then
+        echo "❌ Extraction failed. The archive may be corrupted." | tee -a "$ROLLBACK_LOG_FILE"
+        return 1
     fi
 
+    # Verify package.json exists
+    if [ ! -f "$APP_INSTALL_DIR/package.json" ]; then
+        echo "❌ package.json not found after extraction." | tee -a "$ROLLBACK_LOG_FILE"
+        return 1
+    fi
+
+    # Database setup
+    local DB_URL DB_CHOICE
+    DB_URL=$(jq -r '.dbUrl // empty' "$CONFIG_PATH")
+    DB_CHOICE=$(jq -r '.dbChoice // empty' "$CONFIG_PATH")
+    [ -n "$DB_URL" ] && write_env_mongo_url "$APP_INSTALL_DIR" "$DB_URL"
+
+    [ "$DB_CHOICE" = "local" ] && install_and_start_mongodb
+    install_node "$APP_INSTALL_DIR" || {
+        echo "❌ Node install failed during rollback." | tee -a "$ROLLBACK_LOG_FILE"
+        return 1
+    }
+
+    cd "$APP_INSTALL_DIR" || exit
+
+    echo "📦 Restoring dependencies..." | tee -a "$ROLLBACK_LOG_FILE"
+    if ! clean_npm_install "$APP_INSTALL_DIR" 2>&1 | tee -a "$ROLLBACK_LOG_FILE"; then
+        echo "❌ npm install failed during rollback." | tee -a "$ROLLBACK_LOG_FILE"
+        return 1
+    fi
+
+    write_env_server_details
+    check_pm2
+
+    echo "🚀 Restarting previous version with PM2..." | tee -a "$ROLLBACK_LOG_FILE"
+
+    # Kill only hiretrack-* processes, not all
+    echo "🧹 Cleaning up old hiretrack PM2 processes..." | tee -a "$ROLLBACK_LOG_FILE"
+    pm2 list | awk '/hiretrack-/ {print $4}' | while read -r PROC; do
+        if [ -n "$PROC" ]; then
+            echo "🛑 Stopping $PROC..." | tee -a "$ROLLBACK_LOG_FILE"
+            pm2 delete "$PROC" 2>&1 | tee -a "$ROLLBACK_LOG_FILE" || true
+        fi
+    done
+
+    # Format version name for PM2
+    local VERSION_NAME="$VERSION_TO_RESTORE"
+    if [[ "$VERSION_NAME" != v* ]]; then
+        VERSION_NAME="v$VERSION_NAME"
+    fi
+
+    # Start the restored version
+    pm2 start "npm run start" --name "hiretrack-$VERSION_NAME" --cwd "$APP_INSTALL_DIR" 2>&1 | tee -a "$ROLLBACK_LOG_FILE" || {
+        echo "❌ Failed to start PM2 process." | tee -a "$ROLLBACK_LOG_FILE"
+        return 1
+    }
+
+    pm2 save --force >/dev/null 2>&1 || true
+
     echo "✅ Rollback completed." | tee -a "$ROLLBACK_LOG_FILE"
-    write_config "installedVersion" "$VERSION_TO_RESTORE"
+    write_config "installedVersion" "$VERSION_NAME"
 }
 
 
@@ -999,6 +1051,13 @@ check_update_and_install() {
     fi
 
     log "🚀 Update available: upgrading to $LATEST_VERSION"
+    
+    # Store current version as previousVersion in config.json before updating
+    if [ "$INSTALLED_VERSION" != "none" ] && [ -n "$INSTALLED_VERSION" ]; then
+        log "💾 Storing previous version ($INSTALLED_VERSION) in config.json..."
+        write_config "previousVersion" "$INSTALLED_VERSION"
+    fi
+    
     local TMP_FILE
     TMP_FILE=$(validate_license_and_get_asset "$LATEST_VERSION") || { log "❌ Failed to validate license and download asset."; return 1; }
     
@@ -1020,40 +1079,12 @@ check_update_and_install() {
     fi
     APP_NAME_WITH_VERSION="hiretrack-$VERSION_NAME"
 
-    # # Backup existing
-    # local BACKUP_FILE="$BACKUP_DIR/backup-$INSTALLED_VERSION.tar"
-    # if [ "$INSTALLED_VERSION" != "none" ] && [ -d "$APP_INSTALL_DIR" ]; then
-    #     log "📦 Backing up current version..."
-    #     tar --exclude='node_modules' -cf "$BACKUP_FILE" -C "$APP_INSTALL_DIR" .
-    #     log "✅ Backup saved at: $BACKUP_FILE"
-    # else
-    #     log "⚠️ No existing installation to back up."
-    # fi
-
-    # --- BACKUP HANDLING ---
-    local BACKUP_FILE="$BACKUP_DIR/backup-$INSTALLED_VERSION.tar"
-    mkdir -p "$BACKUP_DIR"
-
-    if [ "$INSTALLED_VERSION" != "none" ] && [ -d "$APP_INSTALL_DIR/node_modules" ]; then
-        echo "📦 Backing up current version ($INSTALLED_VERSION)..."
-        # Remove any old backup first (keep only one)
-        if ls "$BACKUP_DIR"/backup-*.tar >/dev/null 2>&1; then
-            echo "🧹 Removing old backup..."
-            rm -f "$BACKUP_DIR"/backup-*.tar
-        fi
-
-        tar --exclude='node_modules' -cf "$BACKUP_FILE" -C "$APP_INSTALL_DIR" .
-        echo "✅ Backup saved at: $BACKUP_FILE"
-    else
-        echo "⚠️ No valid installation found to backup (no node_modules or empty app dir)."
-    fi
-
 
 
     # Validate downloaded file before extraction
     if [ ! -f "$TMP_FILE" ]; then
         log "❌ Downloaded file not found at $TMP_FILE"
-        rollback "$INSTALLED_VERSION"
+        rollback
         return 1
     fi
 
@@ -1064,7 +1095,7 @@ check_update_and_install() {
         log "❌ Downloaded file is too small ($FILE_SIZE bytes). File may be corrupted or incomplete."
         log "💡 This may indicate a network issue or incomplete download."
         rm -f "$TMP_FILE"
-        rollback "$INSTALLED_VERSION"
+        rollback
         return 1
     fi
 
@@ -1109,10 +1140,10 @@ check_update_and_install() {
         log "💡 File size: $FILE_SIZE_DISPLAY"
         log "💡 Attempting to re-download..."
         rm -f "$TMP_FILE"
-        rollback "$INSTALLED_VERSION"
+        rollback
         return 1
     fi
-    rm -f "$TMP_FILE" >/dev/null 2>&1 || true
+    # Keep temp file during extraction and PM2 startup - will be cleaned up after successful start
     log "✅ Extracted to: $APP_INSTALL_DIR"
     
 
@@ -1123,7 +1154,8 @@ check_update_and_install() {
         log "❌ package.json not found after extraction. Archive structure may be invalid."
         log "💡 Contents of $APP_INSTALL_DIR:"
         ls -la "$APP_INSTALL_DIR" | head -20 >&2 || true
-        rollback "$INSTALLED_VERSION"
+        rm -f "$TMP_FILE" >/dev/null 2>&1 || true
+        rollback
         return 1
     fi
     
@@ -1135,11 +1167,21 @@ check_update_and_install() {
     [ -n "$DB_URL" ] && write_env_mongo_url "$APP_INSTALL_DIR" "$DB_URL"
 
     [ "$DB_CHOICE" = "local" ] && install_and_start_mongodb
-    install_node "$APP_INSTALL_DIR" || { log "❌ Node install failed."; rollback "$INSTALLED_VERSION"; return 1; }
+    install_node "$APP_INSTALL_DIR" || {
+        log "❌ Node install failed."
+        rm -f "$TMP_FILE" >/dev/null 2>&1 || true
+        rollback
+        return 1
+    }
     
     log "✅ Using Node.js ($(node -v))"
     
-    cd "$APP_INSTALL_DIR" || { log "❌ Failed to cd into app dir."; rollback "$INSTALLED_VERSION"; return 1; }
+    cd "$APP_INSTALL_DIR" || {
+        log "❌ Failed to cd into app dir."
+        rm -f "$TMP_FILE" >/dev/null 2>&1 || true
+        rollback
+        return 1
+    }
     
     # Show files in APP_INSTALL_DIR for debugging
     log "📁 Files in $APP_INSTALL_DIR:"
@@ -1152,7 +1194,8 @@ check_update_and_install() {
 
     if ! clean_npm_install "$APP_INSTALL_DIR"; then
         log "❌ npm install failed."
-        rollback "$INSTALLED_VERSION"
+        rm -f "$TMP_FILE" >/dev/null 2>&1 || true
+        rollback
         return 1
     fi
     write_env_server_details ;
@@ -1171,7 +1214,8 @@ check_update_and_install() {
     pm2 start "npm run start" --name "$APP_NAME_WITH_VERSION" --cwd "$APP_INSTALL_DIR" || {
         log "❌ Failed to start. Rolling back..."
         pm2 delete "$APP_NAME_WITH_VERSION" || true
-        rollback "$INSTALLED_VERSION"
+        rm -f "$TMP_FILE" >/dev/null 2>&1 || true
+        rollback
         return 1
     }
 
@@ -1181,10 +1225,15 @@ check_update_and_install() {
         log "📦 Running migrations from $NORMALIZED_INSTALLED to $NORMALIZED_LATEST..."
         run_migrations "$NORMALIZED_INSTALLED" "$NORMALIZED_LATEST" || {
             log "❌ Migrations failed. Rolling back..."
-            rollback "$INSTALLED_VERSION"
+            rm -f "$TMP_FILE" >/dev/null 2>&1 || true
+            rollback
             return 1
         }
     fi
+    
+    # Clean up temp file after successful update (PM2 started and migrations completed)
+    rm -f "$TMP_FILE" >/dev/null 2>&1 || true
+    log "🧹 Cleaned up temporary download file"
     log "✅ Successfully installed/updated to $VERSION_NAME at $APP_INSTALL_DIR"
     write_config "installedVersion" "$VERSION_NAME"
 
@@ -2496,20 +2545,8 @@ case "${1:-}" in
         run_migrations "${2:-}" "${3:-}"
         ;;
     --rollback)
-        VERSION_TO_USE="${2:-}"
-
-        # If version is "none", return 1
-        if [ "$VERSION_TO_USE" = "none" ]; then
-            echo "❌ No previous version found to rollback."
-            return 1
-        fi
-
-        # If version is empty, prompt the user
-        if [ -z "$VERSION_TO_USE" ]; then
-            VERSION_TO_USE=$(prompt_for_version) || exit 1
-        fi
-
-        rollback "$VERSION_TO_USE"
+        # Version is automatically detected from config.json (previousVersion)
+        rollback
         ;;
     --setup-cron)
         setup_cron
@@ -2532,8 +2569,8 @@ case "${1:-}" in
         echo "  --run-migrations [from] [to]  Run database migrations between versions"
         echo "                                Example: $0 --run-migrations 2.2.25 2.2.26"
         echo
-        echo "  --rollback [version]          Roll back to a specific or previous version"
-        echo "                                Example: $0 --rollback 2.2.25"
+        echo "  --rollback                    Roll back to previous version (from config.json)"
+        echo "                                Example: $0 --rollback"
         echo
         echo "  --setup-cron                  Set up automatic update cron job"
         echo "                                Configures cron to check for updates automatically"
