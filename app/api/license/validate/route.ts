@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { connectToDatabase } from "@/lib/db";
 import { validateLicense } from "@/lib/license";
 import { licenseValidateSchema } from "@/lib/validators";
@@ -11,7 +11,7 @@ const RATE_LIMIT_CONFIG = {
 };
 
 // POST: Validate a license
-export async function POST(req: Request) {
+export async function POST(req: NextRequest) {
   try {
     // Get client IP address
     const clientIP = await getClientIP(req);
