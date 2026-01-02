@@ -97,15 +97,16 @@ export async function GET(req: Request) {
 
           const contentType =
             assetResponse.headers.get("content-type") || "application/octet-stream";
+          const contentLength = assetResponse.headers.get("content-length");
           console.log("contentType", contentType , "assetResponse", assetResponse);
-          // Stream the file back to the client
-          const fileBuffer = await assetResponse.arrayBuffer();
-          return new NextResponse(fileBuffer, {
+          
+          // Stream the file back to the client instead of loading into memory
+          return new NextResponse(assetResponse.body, {
             status: 200,
             headers: {
               "Content-Type": contentType,
               "Content-Disposition": `attachment; filename="${filename}"`,
-              "Content-Length": fileBuffer.byteLength.toString(),
+              ...(contentLength ? { "Content-Length": contentLength } : {}),
             },
           });
         }
@@ -238,16 +239,15 @@ export async function GET(req: Request) {
     // Get the content type
     const contentType =
       assetResponse.headers.get("content-type") || "application/octet-stream";
+    const contentLength = assetResponse.headers.get("content-length");
 
-    // Stream the file back to the client
-    const fileBuffer = await assetResponse.arrayBuffer();
-
-    return new NextResponse(fileBuffer, {
+    // Stream the file back to the client instead of loading into memory
+    return new NextResponse(assetResponse.body, {
       status: 200,
       headers: {
         "Content-Type": contentType,
         "Content-Disposition": `attachment; filename="${filename}"`,
-        "Content-Length": fileBuffer.byteLength.toString(),
+        ...(contentLength ? { "Content-Length": contentLength } : {}),
       },
     });
   } catch (error: unknown) {
