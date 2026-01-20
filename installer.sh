@@ -564,7 +564,6 @@ register_license() {
     local EMAIL="$1"
     [ -z "$EMAIL" ] && EMAIL=$(prompt_for_email)
     local MACHINE_CODE=$(get_machine_code)
-    echo "MACHINE_CODE: $MACHINE_CODE"
     local EXISTING_DB_CHOICE
     EXISTING_DB_CHOICE=$(jq -r '.dbChoice // empty' "$CONFIG_PATH")
     local SKIP_DB_SETUP=""
@@ -608,14 +607,18 @@ register_license() {
         write_env_mongo_url "$APP_DIR" "$DB_URL"
         write_config "dbUrl" "$DB_URL"
     fi
-    echo "API_URL: $API_URL with email: $EMAIL and machineCode: $MACHINE_CODE"
     local RESPONSE
     RESPONSE=$(curl -s -X POST "$API_URL" -H "Content-Type: application/json" -d "{\"email\":\"$EMAIL\",\"machineCode\":\"$MACHINE_CODE\"}")
     if [ -z "$RESPONSE" ] || ! echo "$RESPONSE" | jq . >/dev/null 2>&1; then
         echo "❌ License registration failed: Invalid response."
         exit 1
     fi
-    echo "RESPONSE: $RESPONSE"
+    local ERROR_MSG
+    ERROR_MSG=$(echo "$RESPONSE" | jq -r '.error // empty')
+    if [ -n "$ERROR_MSG" ] && [ "$ERROR_MSG" != "null" ]; then
+        echo "❌ License registration failed: $ERROR_MSG"
+        exit 1
+    fi
     local LICENSE_KEY EMAIL_RES
     LICENSE_KEY=$(echo "$RESPONSE" | jq -r '.license.licenseKey')
     EMAIL_RES=$(echo "$RESPONSE" | jq -r '.license.email')
@@ -1852,7 +1855,7 @@ setup_nginx() {
 			echo "   (inside the http {} block)"
 		    }
 		fi
-		brew services start nginx
+		brew services start nginx >/dev/null 2>&1
 	    fi
 
 	    sleep 2
@@ -1947,15 +1950,17 @@ setup_nginx() {
 	    fi
 
 	    # Try standalone mode
+	    echo "   ⏳ Obtaining certificate (this may take a moment)..."
 	    if sudo certbot certonly \
 		--standalone \
 		--non-interactive \
 		--agree-tos \
+		--quiet \
 		--email "\$EMAIL" \
 		--preferred-challenges http \
 		-d "\$DOMAIN_NAME" \
 		--pre-hook "systemctl stop nginx 2>/dev/null || true" \
-		--post-hook "systemctl start nginx 2>/dev/null || true" 2>&1 | tee /tmp/certbot_\$DOMAIN_NAME.log; then
+		--post-hook "systemctl start nginx 2>/dev/null || true" >/tmp/certbot_\$DOMAIN_NAME.log 2>&1; then
 
 		USE_HTTPS="true"
 		echo ""
@@ -2168,9 +2173,11 @@ INNEREOF
 	    # Test configuration
 	    echo ""
 	    echo "🧪 Testing Nginx configuration..."
-	    if sudo nginx -t; then
+	    if sudo nginx -t >/dev/null 2>&1; then
 		echo "✅ Configuration test passed!"
 	    else
+		echo "❌ Configuration test failed!"
+		sudo nginx -t
 		echo "❌ Configuration test failed!"
 		echo ""
 		echo "Rolling back to previous configuration..."
@@ -2188,9 +2195,9 @@ INNEREOF
 	    echo ""
 	    echo "🔄 Reloading Nginx..."
 	    if [[ "\$OS_TYPE" == "linux" ]]; then
-		sudo systemctl reload nginx
+		sudo systemctl reload nginx >/dev/null 2>&1
 	    elif [[ "\$OS_TYPE" == "darwin" ]]; then
-		brew services restart nginx
+		brew services restart nginx >/dev/null 2>&1
 	    fi
 
 	    sleep 2
@@ -2326,9 +2333,19 @@ INNEREOF
 		echo ""
 	    fi
 
-	    echo "You can register the first organization from the URL given below: "
-            echo "https://\$DOMAIN_NAME/register/org"
-
+	    echo ""
+	    echo "════════════════════════════════════════════════"
+	    echo "  🎯 REGISTRATION URL"
+	    echo "════════════════════════════════════════════════"
+	    echo ""
+	    echo "You can register the first organization from the URL below:"
+	    echo ""
+	    echo "   ╔═══════════════════════════════════════════════════════════╗"
+	    echo "   ║                                                           ║"
+	    echo "   ║   https://\$DOMAIN_NAME/register/org                      ║"
+	    echo "   ║                                                           ║"
+	    echo "   ╚═══════════════════════════════════════════════════════════╝"
+	    echo ""
 	    echo "════════════════════════════════════════════════"
 	}
 
@@ -2473,17 +2490,19 @@ setup_cron() {
         local CURRENT_CRON=$(crontab -l 2>/dev/null || echo "")
 
         # ------------------------------------------------
-        # 🧩 Auto-update Cron (every 2 minutes)
+        # 🧩 Auto-update Cron (every day at 2 AM)
         # ------------------------------------------------
         if ! echo "$CURRENT_CRON" | grep -Fq "$CRON_ENTRY"; then
             (echo "$CURRENT_CRON"; echo "# CRON_NAME:$CRON_NAME"; echo "$CRON_ENTRY") | crontab -
             echo "✅ Cron job '$CRON_NAME' added. Logs: $CRON_LOG_FILE"
+            # Re-read crontab to include the newly added job
+            CURRENT_CRON=$(crontab -l 2>/dev/null || echo "")
         else
             echo "✅ Cron job '$CRON_NAME' already exists. Logs: $CRON_LOG_FILE"
         fi
 
         # ------------------------------------------------
-        # 🧩 Snapshot Cron (every 24 hours)
+        # 🧩 Snapshot Cron (every day at 2 AM)
         # ------------------------------------------------
         if [ -f "$SNAPSHOT_SCRIPT" ]; then
             if ! echo "$CURRENT_CRON" | grep -Fq "$SNAPSHOT_CRON_ENTRY"; then
